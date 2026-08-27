@@ -38,11 +38,10 @@ Don't hardcode the kinds. A deployment registers only the chains it has keys
 and funding for, so the node itself is the authority on what it will do:
 
 ```bash
-curl https://gas.devnet.toonprotocol.dev/health
+curl https://gas.devnet.toonprotocol.dev/describe
 ```
 ```json
 {
-  "status": "ok",
   "handlerKinds": [5096, 5098],
   "jobs": [
     { "kind": 5096, "resultKind": 6096, "name": "solana-gas-station",
@@ -52,6 +51,11 @@ curl https://gas.devnet.toonprotocol.dev/health
   ]
 }
 ```
+
+`/health` is next door and answers a different question — is this alive, and
+what has it been doing. It carries `handlerKinds` too, because a monitoring
+system reasonably alerts on a node that came up serving fewer kinds than
+expected, but the protocol detail lives in `/describe`.
 
 `chains` is the field that usually decides it: knowing a node speaks kind:5098
 is not the same as knowing it will relay on *your* chain. Every field is
@@ -81,7 +85,7 @@ no spec if it has drifted.
 
 ### One thing you cannot guess: there is no relay round-trip
 
-`/health` states it under `transport`, because "NIP-90 kind:5096" implies
+`/describe` states it under `transport`, because "NIP-90 kind:5096" implies
 something that is not true here:
 
 ```json
@@ -109,11 +113,26 @@ job: what to send, where to send it, and what it costs.
 curl https://proxy.gas.devnet.toonprotocol.dev/ilp
 ```
 
-That split is not ideal — a client would rather ask once — and the reason for
-it is that the connector terminates a route without knowing what the app behind
-it accepts, so its self-description has no field for job kinds. Putting them
-there is a connector change (`[[routes]]` gains the kinds, and they surface in
-the self-description); until then, the app answers for itself.
+Two documents is one too many, and `GET /ilp` is the one that should carry
+both — it is the *self-description*, and "what this node serves" is a fact
+about the node.
+
+The reason it doesn't yet is worth knowing, because it also rules out the
+obvious fix. The connector's `[node]` section is explicitly only for facts a
+node **cannot introspect** — its public endpoints and its ILP addresses —
+and everything else it publishes is *derived*: prices from `[[routes]]`,
+settlement facts from the backends that verified them on chain. That rule
+exists because a declared copy drifts: `[announce].solana_chain_id` was a
+second declaration of a fact the Solana backend already held, nothing compared
+the two, and a mainnet node described itself as devnet (connector#981). A
+`kinds = [5096, 5098]` line in `connector.toml` would be exactly that bug
+again — and `relay_url` was deleted from that section for being an
+*application* fact, which job kinds also are.
+
+So the fix is not to declare them there but to **derive** them there, the way
+settlement facts already are: the connector projects into `/ilp` what the app
+authoritatively answers at `/describe`. That is connector#1210. This endpoint
+is the half of it that can exist today.
 
 ---
 
