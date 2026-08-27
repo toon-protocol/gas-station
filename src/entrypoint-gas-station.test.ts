@@ -437,7 +437,9 @@ describe('buildHandlers', () => {
       },
       counter
     );
-    expect(jobs).toEqual([
+    // The request specs themselves are asserted against the handlers in
+    // job-definitions.test.ts — here we only care that each job carries one.
+    expect(jobs.map(({ request: _request, ...rest }) => rest)).toEqual([
       {
         kind: 5096,
         resultKind: 6096,
@@ -453,6 +455,9 @@ describe('buildHandlers', () => {
         chains: ['evm:84532', 'evm:11155111'],
       },
     ]);
+    for (const job of jobs) {
+      expect(Object.keys(job.request).sort()).toEqual(['execute', 'quote']);
+    }
   });
 
   it('describes only what is registered — an unconfigured chain is absent, not empty', () => {

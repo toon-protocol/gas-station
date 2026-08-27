@@ -45,3 +45,37 @@ export function acceptReceipt(receipt: unknown): GasStationHandlerResponse {
 
 export const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---------------------------------------------------------------------------
+// Self-description: how to build a request for a kind
+// ---------------------------------------------------------------------------
+
+/**
+ * One `['param', name, value]` tag a job accepts, described for a client that
+ * has never seen this app.
+ *
+ * These declarations live beside the code that reads the params, and
+ * `job-definitions.test.ts` drives each handler with each required param
+ * missing to prove the declaration matches the behaviour. That is the point of
+ * them: a client builds a request from this, so a param list that has drifted
+ * away from what the handler actually parses is worse than no list at all.
+ */
+export interface JobParamSpec {
+  name: string;
+  required: boolean;
+  /** When the value is fixed (`phase`), the value it must take. */
+  value?: string;
+  /** What to put in it, for a human reading the response. */
+  description: string;
+}
+
+/** How to build a request for one phase of a job. */
+export interface JobPhaseSpec {
+  params: JobParamSpec[];
+}
+
+/** Both phases of a job kind. Every gas job is quote-then-execute. */
+export interface JobRequestSpec {
+  quote: JobPhaseSpec;
+  execute: JobPhaseSpec;
+}

@@ -74,10 +74,63 @@ import type {
   GasStationHandlerContext,
   GasStationHandlerResponse,
 } from './gas-station-backend.js';
-import { paramTag, acceptReceipt, sleep } from './job-params.js';
+import {
+  paramTag,
+  acceptReceipt,
+  sleep,
+  type JobRequestSpec,
+} from './job-params.js';
 
 /** The NIP-90 job kind for an evm-gas-station (meta-tx relayer) job. */
 export const EVM_GAS_STATION_KIND = 5098;
+
+/**
+ * How a client builds a kind:5098 request. Served from `/health` so a client
+ * can construct a job without reading this file — see `JobParamSpec`.
+ */
+export const EVM_GAS_STATION_REQUEST_SPEC: JobRequestSpec = {
+  quote: {
+    params: [
+      { name: 'phase', required: true, value: 'quote', description: 'Selects the quote phase.' },
+      {
+        name: 'chainId',
+        required: true,
+        description:
+          'Decimal EVM chain id. Must be one this node serves — /health lists them ' +
+          "as `evm:<chainId>` under the job's `chains`.",
+      },
+      {
+        name: 'from',
+        required: true,
+        description:
+          'The address that will sign the forward request. The quote is bound to ' +
+          'it, and execute refuses a request from anyone else.',
+      },
+    ],
+  },
+  execute: {
+    params: [
+      { name: 'phase', required: true, value: 'execute', description: 'Selects the execute phase.' },
+      { name: 'chainId', required: true, description: 'The same chain id the quote was issued for.' },
+      {
+        name: 'request',
+        required: true,
+        description:
+          'base64 of the JSON ForwardRequestData — {from, to, value, gas, deadline, ' +
+          'data, signature} — EIP-712 signed for the forwarder named in the quote. ' +
+          '`value` and `gas` are decimal strings; `deadline` is unix seconds.',
+      },
+      { name: 'quoteId', required: true, description: 'The quoteId from the quote phase.' },
+      {
+        name: 'idempotencyKey',
+        required: true,
+        description:
+          'Any unique string. Retrying with the same key returns the original ' +
+          'result rather than submitting twice.',
+      },
+    ],
+  },
+};
 
 // ---------------------------------------------------------------------------
 // ForwardRequestData (OpenZeppelin ERC2771Forwarder.ForwardRequestData)

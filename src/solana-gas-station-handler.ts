@@ -83,11 +83,60 @@ import type {
   GasStationHandlerContext,
   GasStationHandlerResponse,
 } from './gas-station-backend.js';
-import { paramTag, acceptReceipt, sleep, type SolanaNetwork } from './job-params.js';
+import {
+  paramTag,
+  acceptReceipt,
+  sleep,
+  type JobRequestSpec,
+  type SolanaNetwork,
+} from './job-params.js';
 import { ARIO_PROGRAM_IDS, SOLANA_RPC_URLS } from './ario-programs.js';
 
 /** The NIP-90 job kind for a gas-station (fee-payer-as-a-service) job. */
 export const GAS_STATION_KIND = 5096;
+
+/**
+ * How a client builds a kind:5096 request. Served from `/health` so a client
+ * can construct a job without reading this file — see `JobParamSpec`.
+ */
+export const GAS_STATION_REQUEST_SPEC: JobRequestSpec = {
+  quote: {
+    params: [
+      { name: 'phase', required: true, value: 'quote', description: 'Selects the quote phase.' },
+      {
+        name: 'transaction',
+        required: false,
+        description:
+          'Optional draft transaction, base64 wire format. Supplying one runs the ' +
+          'full policy gate and prices the quote from a simulation, so a violation ' +
+          'is something you learn before signing. Without it the quote returns the ' +
+          'default per-job allowance.',
+      },
+    ],
+  },
+  execute: {
+    params: [
+      { name: 'phase', required: true, value: 'execute', description: 'Selects the execute phase.' },
+      {
+        name: 'transaction',
+        required: true,
+        description:
+          'The transaction, base64 wire format, partially signed by every required ' +
+          "signer except the fee payer, with the quote's feePayer as fee payer and " +
+          "built against the quote's recentBlockhash.",
+      },
+      { name: 'quoteId', required: true, description: 'The quoteId from the quote phase.' },
+      {
+        name: 'idempotencyKey',
+        required: true,
+        description:
+          'Any unique string. Retrying with the same key returns the original ' +
+          'result rather than broadcasting twice — which is what makes a ' +
+          'confirmation_timeout safe to retry.',
+      },
+    ],
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Well-known program addresses

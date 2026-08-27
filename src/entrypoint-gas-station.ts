@@ -77,14 +77,20 @@ import {
   type GasStationBackend,
   type GasStationHandler,
 } from './gas-station-backend.js';
-import { SOLANA_PUBKEY_REGEX, type SolanaNetwork } from './job-params.js';
+import {
+  SOLANA_PUBKEY_REGEX,
+  type JobRequestSpec,
+  type SolanaNetwork,
+} from './job-params.js';
 import {
   GAS_STATION_KIND,
+  GAS_STATION_REQUEST_SPEC,
   createGasStationHandler,
   assertSolanaKeypair,
 } from './solana-gas-station-handler.js';
 import {
   EVM_GAS_STATION_KIND,
+  EVM_GAS_STATION_REQUEST_SPEC,
   createEvmGasStationHandler,
   type EvmChainConfig,
 } from './evm-gas-station-handler.js';
@@ -191,6 +197,8 @@ export interface JobKindDescription {
    * for kind:5098.
    */
   chains: string[];
+  /** Which `['param', name, value]` tags to set, per phase. */
+  request: JobRequestSpec;
 }
 
 /**
@@ -209,6 +217,24 @@ export interface GasStationHealthResponse {
   version: string;
   nodePubkey: string;
   uptimeSec: number;
+  /**
+   * How a job reaches this node, and how the answer comes back. Stated
+   * because it is the one thing a client cannot infer from "NIP-90 kind:5096":
+   * there is no relay round-trip here. The signed job event is POSTed to this
+   * node by the connector in front, as the termination of a paid ILP packet,
+   * and the receipt returns in that response — it is never published as a
+   * kind:6096 event on any relay. `resultKind` below describes the SHAPE the
+   * receipt takes, not an event to go looking for.
+   */
+  transport: {
+    protocol: 'nip90-over-ilp';
+    /** Set these as `['param', name, value]` tags — not NIP-90 `i` tags. */
+    inputEncoding: 'param-tags';
+    /** The receipt is base64 JSON in the response's `data` field. */
+    resultDelivery: 'ilp-fulfill-body';
+    /** A refusal is an accepted job with `status:"failed"` and a `reason`. */
+    refusals: 'in-band';
+  };
   /** The registered kinds, bare. Kept for callers that only want the numbers. */
   handlerKinds: number[];
   /** The same kinds, described — see {@link JobKindDescription}. */
@@ -496,6 +522,7 @@ export function buildHandlers(
       name: 'solana-gas-station',
       phases: ['quote', 'execute'],
       chains: [`solana:${solana.network}`],
+      request: GAS_STATION_REQUEST_SPEC,
     });
   }
 
@@ -518,6 +545,7 @@ export function buildHandlers(
       name: 'evm-gas-station',
       phases: ['quote', 'execute'],
       chains: evm.chains.map((c) => `evm:${c.chainId}`),
+      request: EVM_GAS_STATION_REQUEST_SPEC,
     });
   }
 
@@ -583,6 +611,12 @@ async function main(): Promise<void> {
       version: '1.0.0',
       nodePubkey: safePubkey,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+      transport: {
+        protocol: 'nip90-over-ilp',
+        inputEncoding: 'param-tags',
+        resultDelivery: 'ilp-fulfill-body',
+        refusals: 'in-band',
+      },
       handlerKinds,
       jobs,
       jobsRecent: counter.snapshot(),
