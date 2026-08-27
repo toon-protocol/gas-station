@@ -425,6 +425,56 @@ describe('buildHandlers', () => {
     expect(lines.join(' ')).toContain('84532');
   });
 
+  it('describes each registered kind well enough to act on', () => {
+    const { jobs } = buildHandlers(
+      {
+        GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY,
+        SOLANA_NETWORK: 'mainnet',
+        EVM_GAS_STATION_CONFIG_JSON: JSON.stringify([
+          evmEntry(),
+          evmEntry({ chainId: 11155111, rpcUrl: 'https://sepolia.example.com' }),
+        ]),
+      },
+      counter
+    );
+    expect(jobs).toEqual([
+      {
+        kind: 5096,
+        resultKind: 6096,
+        name: 'solana-gas-station',
+        phases: ['quote', 'execute'],
+        chains: ['solana:mainnet'],
+      },
+      {
+        kind: 5098,
+        resultKind: 6098,
+        name: 'evm-gas-station',
+        phases: ['quote', 'execute'],
+        chains: ['evm:84532', 'evm:11155111'],
+      },
+    ]);
+  });
+
+  it('describes only what is registered — an unconfigured chain is absent, not empty', () => {
+    // The point of deriving this from the registered handlers rather than a
+    // config literal: it cannot claim a chain the node will not serve.
+    const { jobs } = buildHandlers({ GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY }, counter);
+    expect(jobs.map((j) => j.kind)).toEqual([5096]);
+  });
+
+  it('keeps handlerKinds and jobs in agreement', () => {
+    const { handlers, jobs } = buildHandlers(
+      {
+        GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY,
+        EVM_GAS_STATION_CONFIG_JSON: JSON.stringify([evmEntry()]),
+      },
+      counter
+    );
+    expect(jobs.map((j) => j.kind).sort()).toEqual(Object.keys(handlers).map(Number).sort());
+    // The NIP-90 formula, not an arbitrary second allocation.
+    for (const job of jobs) expect(job.resultKind).toBe(job.kind + 1000);
+  });
+
   it('refuses to build a gas station with no chain at all', () => {
     // Not a degraded mode worth running: every kind this app serves is
     // optional, so a process with none registered would answer nothing.
@@ -442,6 +492,10 @@ describe('entrypoint-gas-station.ts — health server static analysis', () => {
 
   it('registers GET /health', () => {
     expect(src).toMatch(/blsApp\.get\(['"]\/health['"]/);
+  });
+
+  it('answers /health with the described job kinds, not just the numbers', () => {
+    expect(src).toMatch(/handlerKinds,\s*\n\s*jobs,/);
   });
 
   it('serves it on blsPort', () => {

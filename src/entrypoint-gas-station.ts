@@ -167,16 +167,52 @@ export function createJobCounter(windowMs: number = 5 * 60 * 1000): JobCounter {
 }
 
 /**
+ * One registered job kind, described well enough for a client to decide
+ * whether this node is any use to it.
+ *
+ * `handlerKinds` alone answers "which kinds" but not "which chains", and for a
+ * gas station that second question is the one that matters: a caller wanting a
+ * Base Sepolia transaction relayed needs to know this node serves 84532
+ * specifically, not merely that it speaks kind:5098. Every field here is
+ * derived from what actually got registered at boot, so it cannot drift from
+ * what the node will really do.
+ */
+export interface JobKindDescription {
+  /** The NIP-90 job-request kind a client sends. */
+  kind: number;
+  /** The result kind its receipt is shaped as (`kind + 1000`). */
+  resultKind: number;
+  name: 'solana-gas-station' | 'evm-gas-station';
+  /** The two phases every gas job goes through. */
+  phases: ['quote', 'execute'];
+  /**
+   * The chains this kind will actually transact on. `solana:devnet` /
+   * `solana:mainnet` for kind:5096; one `evm:<chainId>` per configured chain
+   * for kind:5098.
+   */
+  chains: string[];
+}
+
+/**
  * What `GET /health` answers on BLS_PORT. Declared here rather than imported
  * from the SDK: this app depends on no TOON package at runtime, and one
  * response shape is not a reason to start.
+ *
+ * This doubles as the app's discovery surface. The connector in front
+ * advertises how to PAY this node (`GET /ilp` — addresses, settlement,
+ * prices); nothing there says what to SEND, because the connector terminates
+ * a route without knowing what the app behind it accepts. So the app answers
+ * that itself, here.
  */
 export interface GasStationHealthResponse {
   status: 'ok';
   version: string;
   nodePubkey: string;
   uptimeSec: number;
+  /** The registered kinds, bare. Kept for callers that only want the numbers. */
   handlerKinds: number[];
+  /** The same kinds, described — see {@link JobKindDescription}. */
+  jobs: JobKindDescription[];
   jobsRecent: JobCounterSnapshot;
 }
 
@@ -429,9 +465,14 @@ export function resolveEvmGasStationEnv(
 export function buildHandlers(
   env: NodeJS.ProcessEnv,
   counter: JobCounter
-): { handlers: Record<number, GasStationHandler>; describe: string[] } {
+): {
+  handlers: Record<number, GasStationHandler>;
+  describe: string[];
+  jobs: JobKindDescription[];
+} {
   const handlers: Record<number, GasStationHandler> = {};
   const describe: string[] = [];
+  const jobs: JobKindDescription[] = [];
 
   const solana = resolveGasStationEnv(env);
   if (solana) {
@@ -449,6 +490,13 @@ export function buildHandlers(
       `kind:${GAS_STATION_KIND} Solana (network: ${solana.network}` +
         `${solana.channelProgramId ? `, channel program: ${solana.channelProgramId}` : ''})`
     );
+    jobs.push({
+      kind: GAS_STATION_KIND,
+      resultKind: GAS_STATION_KIND + 1000,
+      name: 'solana-gas-station',
+      phases: ['quote', 'execute'],
+      chains: [`solana:${solana.network}`],
+    });
   }
 
   const evm = resolveEvmGasStationEnv(env);
@@ -464,6 +512,13 @@ export function buildHandlers(
     describe.push(
       `kind:${EVM_GAS_STATION_KIND} EVM (chains: ${evm.chains.map((c) => c.chainId).join(', ')})`
     );
+    jobs.push({
+      kind: EVM_GAS_STATION_KIND,
+      resultKind: EVM_GAS_STATION_KIND + 1000,
+      name: 'evm-gas-station',
+      phases: ['quote', 'execute'],
+      chains: evm.chains.map((c) => `evm:${c.chainId}`),
+    });
   }
 
   if (Object.keys(handlers).length === 0) {
@@ -474,7 +529,7 @@ export function buildHandlers(
     );
   }
 
-  return { handlers, describe };
+  return { handlers, describe, jobs };
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +541,7 @@ async function main(): Promise<void> {
 
   const config = resolvePortConfig(process.env);
   const counter = createJobCounter();
-  const { handlers, describe } = buildHandlers(process.env, counter);
+  const { handlers, describe, jobs } = buildHandlers(process.env, counter);
   for (const line of describe) console.log(`[gas-station] registered ${line}`);
 
   // Prove the Solana key can actually sign before advertising that it will.
@@ -529,6 +584,7 @@ async function main(): Promise<void> {
       nodePubkey: safePubkey,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
       handlerKinds,
+      jobs,
       jobsRecent: counter.snapshot(),
     };
     return c.json(health);

@@ -32,6 +32,47 @@ validation lives only in the connector.
   `src/evm-gas-station-handler.ts` carry the full security argument in their
   module comments. Start there.
 
+## Ask the node what it serves
+
+Don't hardcode the kinds. A deployment registers only the chains it has keys
+and funding for, so the node itself is the authority on what it will do:
+
+```bash
+curl https://gas.devnet.toonprotocol.dev/health
+```
+```json
+{
+  "status": "ok",
+  "handlerKinds": [5096, 5098],
+  "jobs": [
+    { "kind": 5096, "resultKind": 6096, "name": "solana-gas-station",
+      "phases": ["quote", "execute"], "chains": ["solana:devnet"] },
+    { "kind": 5098, "resultKind": 6098, "name": "evm-gas-station",
+      "phases": ["quote", "execute"], "chains": ["evm:84532"] }
+  ]
+}
+```
+
+`chains` is the field that usually decides it: knowing a node speaks kind:5098
+is not the same as knowing it will relay on *your* chain. Every field is
+derived from what actually registered at boot, so it cannot advertise a chain
+the node has no key for.
+
+The connector in front answers the other half — how to **pay** — at
+`GET /ilp` on the paid edge: ILP addresses, settlement contracts per chain, and
+the price of each route. Between the two you have everything needed to send a
+job: what to send, where to send it, and what it costs.
+
+```bash
+curl https://proxy.gas.devnet.toonprotocol.dev/ilp
+```
+
+That split is not ideal — a client would rather ask once — and the reason for
+it is that the connector terminates a route without knowing what the app behind
+it accepts, so its self-description has no field for job kinds. Putting them
+there is a connector change (`[[routes]]` gains the kinds, and they surface in
+the self-description); until then, the app answers for itself.
+
 ---
 
 ## The security property
