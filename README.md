@@ -58,6 +58,48 @@ is not the same as knowing it will relay on *your* chain. Every field is
 derived from what actually registered at boot, so it cannot advertise a chain
 the node has no key for.
 
+Each job also carries a `request` block — the `['param', name, value]` tags to
+set, per phase, with what goes in each:
+
+```json
+"request": {
+  "quote": { "params": [
+    { "name": "phase",   "required": true, "value": "quote", "description": "…" },
+    { "name": "chainId", "required": true, "description": "Decimal EVM chain id…" },
+    { "name": "from",    "required": true, "description": "The address that will sign…" }
+  ]},
+  "execute": { "params": [ … "request", "quoteId", "idempotencyKey" … ] }
+}
+```
+
+That is enough to build a job without reading this repo.
+`src/job-definitions.test.ts` keeps it honest in both directions: it drives
+each handler with each declared-required param omitted and requires a refusal,
+and it reads the handler's own `paramTag` calls to catch a param the code reads
+but the spec never mentions. A spec a client builds requests from is worse than
+no spec if it has drifted.
+
+### One thing you cannot guess: there is no relay round-trip
+
+`/health` states it under `transport`, because "NIP-90 kind:5096" implies
+something that is not true here:
+
+```json
+"transport": {
+  "protocol": "nip90-over-ilp",
+  "inputEncoding": "param-tags",
+  "resultDelivery": "ilp-fulfill-body",
+  "refusals": "in-band"
+}
+```
+
+The signed job event is POSTed to this node by the connector in front, as the
+termination of a paid ILP packet, and the receipt comes back **in that
+response**. It is never published as a `kind:6096` event on any relay.
+`resultKind` describes the *shape* the receipt takes, not an event to go
+looking for. Inputs are `param` tags, not NIP-90 `i` tags. And a refusal
+arrives in-band as an accepted job with `status: "failed"` — see below.
+
 The connector in front answers the other half — how to **pay** — at
 `GET /ilp` on the paid edge: ILP addresses, settlement contracts per chain, and
 the price of each route. Between the two you have everything needed to send a
