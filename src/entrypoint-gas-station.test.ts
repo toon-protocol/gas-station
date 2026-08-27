@@ -499,8 +499,22 @@ describe('entrypoint-gas-station.ts — health server static analysis', () => {
     expect(src).toMatch(/blsApp\.get\(['"]\/health['"]/);
   });
 
-  it('answers /health with the described job kinds, not just the numbers', () => {
-    expect(src).toMatch(/handlerKinds,\s*\n\s*jobs,/);
+  it('serves the self-description at /describe, not /health', () => {
+    // Health is polled every 30s by the container healthcheck and answers one
+    // question: is this alive. A self-description is a different question from
+    // a different caller — folding it in conflates the two.
+    expect(src).toMatch(/blsApp\.get\(['"]\/describe['"]/);
+    expect(src).toMatch(/blsApp\.get\(['"]\/health['"]/);
+  });
+
+  it('keeps the job specs and the transport contract out of /health', () => {
+    const health = src.slice(src.indexOf("blsApp.get('/health'"), src.indexOf("blsApp.get('/describe'"));
+    expect(health).not.toMatch(/jobs,/);
+    expect(health).not.toMatch(/transport:/);
+  });
+
+  it('still reports handlerKinds on both — one line, and monitoring wants it', () => {
+    expect(src.match(/handlerKinds,/g)?.length).toBeGreaterThanOrEqual(2);
   });
 
   it('serves it on blsPort', () => {

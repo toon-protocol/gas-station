@@ -202,21 +202,28 @@ export interface JobKindDescription {
 }
 
 /**
- * What `GET /health` answers on BLS_PORT. Declared here rather than imported
- * from the SDK: this app depends on no TOON package at runtime, and one
- * response shape is not a reason to start.
+ * What `GET /describe` answers: this app's self-description — what it serves
+ * and how to ask for it.
  *
- * This doubles as the app's discovery surface. The connector in front
- * advertises how to PAY this node (`GET /ilp` — addresses, settlement,
- * prices); nothing there says what to SEND, because the connector terminates
- * a route without knowing what the app behind it accepts. So the app answers
- * that itself, here.
+ * Deliberately NOT on `/health`. Health answers "is this process alive", and
+ * is polled by a container healthcheck every 30 seconds; a self-description is
+ * a different question asked by a different caller for a different reason, and
+ * putting protocol semantics in a liveness payload conflates the two.
+ *
+ * The connector in front describes how to PAY this node at its own `GET /ilp`
+ * — addresses, settlement, prices. This is the other half, and it lives here
+ * because the app is the only authority on it: which kinds are registered
+ * depends on which keys this deployment was given, so a copy declared anywhere
+ * else is a second source of truth that will eventually disagree.
+ *
+ * That is also why this endpoint exists at a stable path rather than being
+ * folded into health: it is what the connector would fetch to project these
+ * facts into its own self-description, the way it already projects settlement
+ * facts out of the backends that verified them (connector#1210).
  */
-export interface GasStationHealthResponse {
-  status: 'ok';
+export interface GasStationDescribeResponse {
   version: string;
   nodePubkey: string;
-  uptimeSec: number;
   /**
    * How a job reaches this node, and how the answer comes back. Stated
    * because it is the one thing a client cannot infer from "NIP-90 kind:5096":
@@ -239,6 +246,23 @@ export interface GasStationHealthResponse {
   handlerKinds: number[];
   /** The same kinds, described — see {@link JobKindDescription}. */
   jobs: JobKindDescription[];
+}
+
+/**
+ * What `GET /health` answers: is this process alive, and what has it been
+ * doing. A liveness surface — see {@link GasStationDescribeResponse} for what
+ * this node serves.
+ *
+ * `handlerKinds` stays here too. It is one line, a monitoring system
+ * legitimately wants to alert on a node that came up serving fewer kinds than
+ * expected, and it is derived from the same registration either way.
+ */
+export interface GasStationHealthResponse {
+  status: 'ok';
+  version: string;
+  nodePubkey: string;
+  uptimeSec: number;
+  handlerKinds: number[];
   jobsRecent: JobCounterSnapshot;
 }
 
@@ -605,12 +629,28 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
 
   const blsApp = new Hono();
+
+  // Liveness. Small, cheap, and polled every 30 seconds by the container
+  // healthcheck — which is why the self-description is not in it.
   blsApp.get('/health', (c) => {
     const health: GasStationHealthResponse = {
       status: 'ok',
       version: '1.0.0',
       nodePubkey: safePubkey,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+      handlerKinds,
+      jobsRecent: counter.snapshot(),
+    };
+    return c.json(health);
+  });
+
+  // The self-description: what this node serves and how to ask for it.
+  // Everything in it is derived from what actually registered at boot, so it
+  // cannot claim a kind or a chain this deployment has no key for.
+  blsApp.get('/describe', (c) => {
+    const describeResponse: GasStationDescribeResponse = {
+      version: '1.0.0',
+      nodePubkey: safePubkey,
       transport: {
         protocol: 'nip90-over-ilp',
         inputEncoding: 'param-tags',
@@ -619,9 +659,8 @@ async function main(): Promise<void> {
       },
       handlerKinds,
       jobs,
-      jobsRecent: counter.snapshot(),
     };
-    return c.json(health);
+    return c.json(describeResponse);
   });
 
   const blsServer = serve({ fetch: blsApp.fetch, port: config.blsPort }) as unknown as {
