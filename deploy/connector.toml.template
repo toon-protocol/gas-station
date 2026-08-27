@@ -1,0 +1,175 @@
+# =============================================================================
+# Connector config for the gas-station box — rendered by ./render.sh
+# =============================================================================
+# The connector is the payment proxy in front of the gas station. It meters and
+# settles the payment, then reverse-proxies the job to the app over plain HTTP.
+# Everything the connector needs is in this one file.
+#
+# Three rules the parser enforces, worth knowing before you edit:
+#
+#   * One TOML file, read once at startup, immutable for the process
+#     lifetime. There is NO environment-variable layer — the only variable the
+#     connector reads is RUST_LOG. Editing this file does nothing until the
+#     container restarts (a bind mount is not a reload).
+#   * Unknown keys are a hard startup failure, and removed keys are refused by
+#     name. That is the behaviour you want — a stale config says so at boot
+#     instead of quietly doing nothing — but it means a config change and a
+#     connector upgrade must land in the right order. Land config first.
+#   * Every key that carries a secret is a PATH, never the value. The one
+#     exception is [operator] below, and that is a limitation of the pinned
+#     connector rather than a preference.
+#
+# ── This file targets `:rust-release` ────────────────────────────────────────
+# `docker-compose.yml` pins the connector to the fleet's promotion tag
+# `:rust-release`. Two keys here are written the way THAT build wants them,
+# and both change when the fleet promotes past connector#1165 / #1017:
+#
+#     [announce]        -> becomes [node], and the announce sidecar is deleted
+#                          (the one-shot `connector announce` verb is gone;
+#                          `GET /ilp` serves the self-description instead)
+#     [operator]        -> bearer_token / write_keys become
+#                          bearer_token_file / write_keys_file
+#
+# deploy/README.md § "When the fleet moves past this tag" has the checklist,
+# and src/deploy-bundle-guard.test.ts fails CI if this file and that tag ever
+# disagree.
+# =============================================================================
+
+# The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
+# share this port. Bound to 0.0.0.0 INSIDE the container only — docker-compose
+# publishes it on 127.0.0.1, and nginx is what faces the internet.
+client_edge_addr = "0.0.0.0:4000"
+
+# Where this node records which claims it has already been paid. This MUST be a
+# mounted volume: a watermark that dies with the container hands every payer
+# their spent claims back as free service.
+state_dir = "/app/state"
+
+# This node's signing identity. `GET /ilp/identity` answers with this key, and
+# every gift-wrapped packet is sealed to it.
+[signer]
+key_file = "/app/data/signer.key"
+
+
+# ── What this node sells ─────────────────────────────────────────────────────
+# One route, one app. A paid packet for this prefix is delivered as a plain
+# HTTP POST to `handler_url` (RouteTermination) and the app's answer comes back
+# in the FULFILL.
+#
+# The `/gas` suffix is load-bearing — the app serves POST /gas, and a bare
+# `http://gas-station:3300` comes back as F99 "app declined the delivery with
+# HTTP 404".
+#
+# `price` is a whole number of the SMALLEST UNIT of the settlement token, the
+# way a card terminal counts in cents. USDC has 6 decimals, so:
+#
+#     price = 1000       0.001 USDC     a tenth of a cent   <- this route
+#     price = 100000     0.10  USDC     ten cents
+#     price = 1000000    1.00  USDC     one dollar
+#
+# ── Pricing a gas station is not like pricing a store ────────────────────────
+# This node spends REAL VALUE on behalf of the caller: the fee it pays to land
+# a Solana transaction, or the gas it burns relaying an EVM meta-transaction.
+# A store upload costs the operator credits it bought in bulk; a gas job costs
+# the operator native token at whatever the chain charges that second.
+#
+# The flat price below is charged per JOB, and the quote phase is a job too.
+# Two things keep that honest rather than a way to drain the float:
+#
+#   * the per-job ceilings in the app (`maxLamportsCeiling`, `maxGas`) bound
+#     what any single execute can cost this node, and
+#   * the float checks refuse to quote at all once the wallet cannot cover
+#     roughly two jobs' worth.
+#
+# So the failure mode of underpricing is "the float drains and the node starts
+# answering `float_exhausted`", not "the node signs something ruinous". Watch
+# the float; raise the price if a job costs you more than it earns.
+[[routes]]
+prefix      = "g.toon.gas"
+handler_url = "http://gas-station:3300/gas"
+price       = 1000
+
+
+# ── Getting paid ─────────────────────────────────────────────────────────────
+# Settlement is per-chain. A client pays in whichever of these it holds; the
+# connector verifies the claim against the chain named here.
+#
+# BOTH chains are configured, and for a gas station that is close to
+# mandatory rather than thorough: the whole point of this app is serving a
+# caller who does not hold chain X's gas token. That caller pays in what they
+# DO hold — very often the other chain. A single-chain gas station refuses the
+# traffic it exists to serve.
+#
+# Each table is a fail-closed dependency: startup resolves the token through
+# the registry and reads its `decimals()` on chain, so a wrong RPC or a
+# registry that will not answer is exit 1 at boot, not a runtime surprise.
+
+[settlement.evm]
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"  # TokenNetworkRegistry
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # USDC (6dp)
+decimals         = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# `[settlement.solana]` is APPENDED by ./render.sh when SETTLEMENT_SOLANA=on.
+# It is not in this template because it is fail-closed in a way the EVM table
+# is not: EVM startup only READS the chain (resolve the token through the
+# registry, ask it for `decimals()`), while Solana startup simulates a
+# transaction — which an account holding no SOL cannot do. Point a connector
+# at an unfunded Solana settlement key and it exits 1 at boot with
+#
+#     RPC response error -32002: Transaction simulation failed:
+#     Attempt to debit an account but found no record of a prior credit.
+#
+# and restart-loops. That is correct behaviour (a node that cannot settle
+# should not pretend to), but it makes "fund the key" a PRECONDITION of the
+# first boot rather than a follow-up — so turning the table on is a separate,
+# deliberate step, taken once the key has SOL. See deploy/README.md
+# § Funding the floats.
+
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# Gates /metrics and the redeem endpoints. Without this section they are not
+# mounted at all (404, not 401) — which also means no way to redeem what you
+# have earned, so it is not optional in practice.
+#
+# On the pinned tag these are INLINE values, so the rendered connector.toml is
+# a secret: render.sh writes it 0600 and .gitignore keeps it out of git. Only
+# the template is committed. (On a newer connector they become *_file keys and
+# this stops being true.)
+[operator]
+bearer_token = "${OPERATOR_BEARER_TOKEN}"
+write_keys   = ["${OPERATOR_WRITE_KEY}"]
+
+
+# ── No [[peers]] ─────────────────────────────────────────────────────────────
+# This node is client-edge-only. It accepts no inbound peering and dials none:
+# another TOON node reaches this gas station the way anybody on the open
+# internet does, by paying its client edge. That is a deliberate choice, not a
+# gap — a peering is a bilateral arrangement needing a shared credential and a
+# channel on BOTH sides, and nothing about paying someone's gas needs one.
+#
+# The shape, if you ever do want one:
+#
+#   peer_expose = "btp"
+#
+#   [[peers]]
+#   id         = "somebody"
+#   credential = { secret_file = "/app/data/somebody.secret" }
+#
+#   [[peer_channels]]
+#   peer_id          = "somebody"
+#   channel_id       = "0x..."
+#   counterparty_key = "0x..."
+#   chain_id         = 84532
+#   token_network    = "0x..."
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# THIS DEPLOYMENT — the TOON devnet gas box
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything above describes any gas station behind any connector. What follows
+# is specific to this box's place in the TOON devnet. See deploy/README.md §
+# "Make it yours".

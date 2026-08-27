@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record gate start time
+        id: gate_start
+        run: echo "seconds=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      # build/typecheck/lint/test are independent of each other (build doesn't
+      # consume typecheck's output, vitest runs against src/ not dist/, lint is
+      # standalone), so run them concurrently instead of as sequential steps to
+      # cut gate wall-clock. Each still surfaces its own pass/fail clearly.
+      - name: Build, typecheck, lint, and test (parallel)
+        run: |
+          set +e
+          declare -A pid
+          for step in build typecheck lint test; do
+            pnpm "$step" > "/tmp/$step.log" 2>&1 &
+            pid[$step]=$!
+          done
+
+          failed=""
+          for step in build typecheck lint test; do
+            wait "${pid[$step]}"
+            status=$?
+            echo "::group::pnpm $step"; cat "/tmp/$step.log"; echo "::endgroup::"
+            [ "$status" -ne 0 ] && failed="$failed $step"
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::gate failed:$failed"
+            exit 1
+          fi
+
+      - name: Enforce gate no-regression guard
+        run: |
+          end=$(date +%s)
+          elapsed=$(( end - ${{ steps.gate_start.outputs.seconds }} ))
+          echo "Gate wall-clock: ${elapsed}s"
+          GATE_WALL_CLOCK_SECONDS="$elapsed" npx tsx src/gate-regression-guard.ts
+
+  devbox-validate:
+    name: Devbox Environment Validation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.15.0
+        with:
+          enable-cache: true
+
+      - name: Assert tool versions
+        run: |
+          cat > "${RUNNER_TEMP:-/tmp}/assert-versions.sh" <<'ASSERT'
+          set -euo pipefail
+          node --version | grep -E '^v22\.'
+          pnpm --version | grep -E '^8\.15\.'
+          ASSERT
+          devbox run -- bash "${RUNNER_TEMP:-/tmp}/assert-versions.sh"
+          echo "✅ All devbox tools resolved at expected versions"
+
+      - name: Smoke build
+        run: devbox run -- bash -c "pnpm install --frozen-lockfile && pnpm build"
+
+  # Fleet-wide aggregate required check (toon-meta#279). This job is the single
+  # branch-protection required check for the repo: it fails unless EVERY gating
+  # job above succeeded. `if: always()` + explicit result checks mean a skipped
+  # or cancelled gating job must never read as a pass — only result == 'success'
+  # counts. Both build and devbox-validate run on every pull_request/push:main
+  # event; there are no legitimately-skippable jobs in this workflow.
+  # Fleet no-op merge guard (toon-meta#405), wired INTO this repo's aggregate
+  # required check so that it blocks a HUMAN merge and not just the fleet
+  # auto-merge pass (toon-meta#408). connector#1008 merged green, closed its
+  # ticket and changed zero files -- and it was a human who merged it, because
+  # a red NON-required check is only a warning on the merge button. This
+  # replaces the stand-alone empty-pr-guard-shim.yml, deleted in the same
+  # commit; running both would put two identical "No-op merge guard" check
+  # runs on every PR. Canonical caller snippet and full rationale:
+  # toon-meta scripts/factory/empty-pr-guard-gate-job.yml.
+  #
+  # No `secrets: inherit` -- the guard makes no API call and no write of any
+  # kind, so handing it FACTORY_OPS_TOKEN would widen a monitored credential
+  # for nothing. No `if:` either: this workflow also runs on push, where the
+  # guard passes with a plain "no merge result to evaluate"; a job-level `if:`
+  # would make it `skipped` there, and a skipped gating job must never read as
+  # a pass (toon-meta#279).
+  no-op-merge:
+    uses: toon-protocol/toon-meta/.github/workflows/empty-pr-guard.yml@main
+
+  ci-ok:
+    name: CI OK
+    runs-on: ubuntu-latest
+    needs: [build, devbox-validate, no-op-merge]
+    if: always()
+    steps:
+      - name: Verify all gating jobs succeeded
+        run: |
+          echo "build: ${{ needs.build.result }}"
+          echo "devbox-validate: ${{ needs.devbox-validate.result }}"
+          echo "no-op-merge: ${{ needs.no-op-merge.result }}"
+          if [ "${{ needs.build.result }}" != "success" ] || \
+             [ "${{ needs.devbox-validate.result }}" != "success" ] || \
+             [ "${{ needs.no-op-merge.result }}" != "success" ]; then
+            echo "::error::CI OK requires every gating job to succeed (failure, cancelled, and skipped all fail)"
+            exit 1
+          fi
+          echo "All gating jobs succeeded"

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://toon-protocol/gate-baseline-v1",
+  "repo": "gas-station",
+  "capturedAt": null,
+  "capturedFrom": {
+    "branch": "main",
+    "commit": null,
+    "ciRunUrl": null,
+    "ciRunEvent": null,
+    "_note": "Not yet captured. The first green run on main is what fills this in; until then the guard has no baseline to compare against and passes."
+  },
+  "gateDefinition": {
+    "description": "build / typecheck / lint / test, run in parallel as the single 'build' job in .github/workflows/ci.yml.",
+    "steps": [
+      "pnpm install --frozen-lockfile",
+      "pnpm build",
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm test"
+    ]
+  },
+  "gateSpeed": {
+    "description": "CI wall-clock for the 'build' job (the gate).",
+    "gateJobWallClockSeconds": null,
+    "_note": "null means no baseline: src/gate-regression-guard.ts treats a null baseline as \"nothing to compare against\" and passes. Capture this from the first green run on main."
+  },
+  "gatePerformance": {
+    "runnerMinutesBilled": {
+      "value": null,
+      "unit": "minutes",
+      "method": "GitHub Actions bills hosted-runner jobs in 1-minute increments; round the gate job duration up. Capture from the first green run on main."
+    }
+  },
+  "gateCorrectness": {
+    "lint": {
+      "applicable": true,
+      "errors": 0,
+      "warnings": 4,
+      "note": "4 warnings, all no-non-null-assertion in test files, which eslint.config.js downgrades to warn for **/*.test.ts. Zero errors; there is no suppressions file."
+    },
+    "typecheck": {
+      "errors": 0,
+      "method": "pnpm typecheck (tsc --noEmit) \u2014 clean from the first commit."
+    },
+    "test": {
+      "passed": 185,
+      "failed": 0,
+      "files": 7,
+      "method": "pnpm test (vitest run) at the extraction commit."
+    }
+  },
+  "reproductionMethod": {
+    "gateSpeedAndPerformance": "gh run list --workflow=ci.yml --limit 10 --json ...; gh api repos/toon-protocol/gas-station/actions/runs/<id>/jobs",
+    "gateCorrectness": "pnpm install --frozen-lockfile && pnpm build && pnpm typecheck && pnpm lint && pnpm test"
+  }
+}

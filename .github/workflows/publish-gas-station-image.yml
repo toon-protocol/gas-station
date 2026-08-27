@@ -1,0 +1,71 @@
+name: Publish gas-station image
+
+# Builds the app image (Dockerfile.gas-station) and pushes it to GHCR as
+# ghcr.io/toon-protocol/gas-station.
+#
+# `latest` and `release` are two floating tags carrying the same digest,
+# published only from the default branch (`enable={{is_default_branch}}`, so a
+# tag or manual run off `main` never moves them). Merges to `main` land only
+# after this repo's own CI gate (`ci.yml`'s `CI OK` check) is green, so both
+# tags track green main.
+#
+# `release` exists because it is what the box's Watchtower watches — the same
+# tag name every other TOON fleet box uses, rather than a per-app `:latest`
+# convention. That Watchtower is label-scoped to this app's container; the
+# co-located connector follows the fleet's own promotion tag and is untouched
+# by this workflow. Version tags (vX.Y.Z) also publish semver tags for pinning,
+# plus an immutable sha tag that is what a rollback pins to.
+#
+# Single-arch (amd64): the devnet boxes are x86.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency: publish-gas-station-image-${{ github.ref }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/gas-station
+          # `latest` and `release` both track main (release is the fleet-wide
+          # Watchtower watch target, see header comment above); semver tags
+          # publish on vX.Y.Z; sha tags give an immutable handle.
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=release,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gas-station
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

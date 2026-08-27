@@ -1,0 +1,13 @@
+# The build context is package.json, pnpm-lock.yaml, tsconfig.json,
+# esbuild.config.mjs and src/. Everything else is either large (node_modules),
+# irrelevant to the image (deploy/, .github/, .sandcastle/), or secret.
+node_modules
+dist
+.git
+.github
+.sandcastle
+.devbox
+deploy
+*.md
+.env
+.env.*

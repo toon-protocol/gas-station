@@ -1,0 +1,8 @@
+# Secrets and rendered output. Only the templates are committed.
+.env
+.env.*
+!.env.example
+connector.toml
+nginx/conf.d/
+*.key
+*.secret

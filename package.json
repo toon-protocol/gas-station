@@ -1,0 +1,47 @@
+{
+  "name": "@toon-protocol/gas-station",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TOON gas station — kind:5096 Solana fee-payer, kind:5098 EVM ERC-2771 relayer (Docker entrypoint)",
+  "type": "module",
+  "main": "dist/entrypoint-gas-station.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "start": "node dist/entrypoint-gas-station.js",
+    "test": "vitest run",
+    "sandcastle": "npx tsx .sandcastle/main.ts",
+    "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
+    "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
+    "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts",
+    "sandcastle:fix": "npx tsx .sandcastle/agent-fix-pr.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@solana/kit": "^6.8.0",
+    "ethers": "^6.17.0",
+    "hono": "^4.11.10",
+    "nostr-tools": "^2.20.0"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "@ar.io/sdk": "^4.0.3",
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "smol-toml": "^1.7.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^1.0.0",
+    "yaml": "^2.9.0",
+    "zod": "^3.25.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@8.15.9"
+}

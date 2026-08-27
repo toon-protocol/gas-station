@@ -1,0 +1,105 @@
+# =============================================================================
+# TOON gas-station — kind:5096 Solana fee-payer, kind:5098 EVM ERC-2771 relayer
+# =============================================================================
+# A payment-oblivious HTTP backend. It listens on 3300 for POST /gas, inspects
+# and simulates the caller's transaction, signs and broadcasts it, and answers
+# with the receipt. The connector runs in FRONT of it as the payment proxy and
+# reverse-proxies to it (RouteTermination); this process contains no ILP or
+# payment logic at all.
+#
+#   3300 — POST /gas, the job backend the connector proxies to
+#   3400 — health endpoint (Hono)
+#
+# Build from the repo root:
+#   docker build -f Dockerfile.gas-station -t ghcr.io/toon-protocol/gas-station:dev .
+#
+# ── One source of truth for versions ─────────────────────────────────────────
+# The deps stage installs the production dependency closure straight from
+# package.json + pnpm-lock.yaml. It does not hand-copy module trees and does
+# not re-pin any package, so a dependency's version is written down exactly
+# once, in package.json, and `pnpm install` keeps the lockfile honest. esbuild
+# bundles src/ ONLY (`packages: 'external'`), so every dependency resolves
+# from that installed node_modules at runtime.
+#
+# There is no native module in the closure: @solana/kit and ethers are pure
+# JavaScript, and the one dependency that would have pulled a NAPI binding
+# (@ar.io/sdk, which the store used at runtime for ar.io's program ids) is a
+# devDependency here — those ids are reviewed literals in src/ario-programs.ts
+# instead. The final stage asserts that, so the assumption fails at build time
+# rather than as a boot-time "invalid ELF header" on some other architecture.
+# =============================================================================
+
+# -- Stage 1: build the bundle ------------------------------------------------
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@8.15.9 --activate
+
+# Manifests first, so a source-only change reuses the install layer.
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY tsconfig.json esbuild.config.mjs ./
+COPY src/ ./src/
+RUN pnpm build
+
+# -- Stage 2: production dependency closure -----------------------------------
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@8.15.9 --activate
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --prod --frozen-lockfile --node-linker=hoisted
+
+# Strip what only a compiler or a human reads. Type declarations, source maps
+# and package docs are a large share of the installed tree and nothing at
+# runtime opens them. Files ONLY -- directory names like test/ and examples/
+# are real source in some packages, so pruning by directory name silently
+# breaks module resolution at boot.
+RUN find node_modules -type f \( -name "*.d.ts" -o -name "*.d.mts" -o -name "*.d.cts" \
+      -o -name "*.map" -o -name "*.md" -o -name "*.markdown" \) -delete
+
+# The closure is meant to be pure JavaScript (see the header). Fail the build
+# if that stops being true, rather than shipping an image that boots only on
+# the architecture it was built for.
+RUN if find node_modules -name '*.node' -print -quit | grep -q .; then \
+      echo "ERROR: a native module entered the runtime closure:" >&2; \
+      find node_modules -name '*.node' >&2; \
+      exit 1; \
+    fi
+
+# -- Stage 3: runtime ---------------------------------------------------------
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Non-root user, created before anything is copied in.
+RUN addgroup -g 1001 toon && \
+    adduser -D -u 1001 -G toon toon
+
+COPY --from=deps --chown=toon:toon /app/node_modules ./node_modules
+COPY --from=builder --chown=toon:toon /app/dist/entrypoint-gas-station.js ./entrypoint-gas-station.js
+
+# The bundle is ESM.
+RUN echo '{"type":"module"}' > /app/package.json && chown toon:toon /app/package.json
+
+ENV NODE_ENV=production
+ENV BLS_PORT=3400
+ENV HANDLER_PORT=3300
+
+EXPOSE 3300 3400
+
+# No VOLUME: this process is stateless. Quotes and idempotency records live in
+# memory and are meant to — a restart invalidates open quotes, which is safe
+# (clients re-quote) and a landed transaction can only land once per blockhash
+# or forwarder nonce. The keys arrive as environment variables, and everything
+# durable is on chain.
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
+
+USER toon
+CMD ["node", "/app/entrypoint-gas-station.js"]

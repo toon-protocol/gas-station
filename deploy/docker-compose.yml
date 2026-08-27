@@ -1,0 +1,215 @@
+# =============================================================================
+# The gas-station box — one host, five or six containers
+# =============================================================================
+#   nginx        the public TLS edge (the only thing bound to a public port)
+#   connector    the payment proxy: meters + settles, then proxies to the app
+#   gas-station  the job backend: POST /gas -> a signed, broadcast transaction
+#   certbot      renews the certificate
+#   watchtower   recreates the app containers when their tag moves
+#   announce     publishes the kind:10032 self-announce (profile: announce)
+#
+#   internet ──▶ nginx :443 ──┬──▶ connector :4000 ──▶ gas-station :3300 ──▶ chain
+#                             └──▶ gas-station :3400  (health)
+#
+# Bring it up:  ./render.sh && docker compose up -d
+# See ./README.md — nothing here works without the key files and .env it lists.
+# =============================================================================
+
+name: gas-station
+
+services:
+  # ── The payment proxy ──────────────────────────────────────────────────────
+  # Published on the LOOPBACK only. nginx is what faces the internet; binding
+  # this to 0.0.0.0 would put the paid edge on the public internet past ufw
+  # (docker's iptables rules bypass ufw — see README § Privacy invariant).
+  connector:
+    image: ghcr.io/toon-protocol/connector:rust-release
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    volumes:
+      - ./connector.toml:/app/config/connector.toml:ro
+      - ./signer.key:/app/data/signer.key:ro
+      - ./settlement.key:/app/data/settlement.key:ro
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      - connector_state:/app/state
+    ports:
+      - '127.0.0.1:4000:4000'
+    restart: unless-stopped
+
+  # ── The job backend ────────────────────────────────────────────────────────
+  # No `ports:` at all. The connector reaches it over the compose network as
+  # the termination of a paid route, and nginx serves its health endpoint.
+  # Nothing else should be able to reach it: a public path to POST /gas would
+  # be a free door — anyone who found the URL would get their transactions
+  # signed and their gas paid out of this box's float, for nothing.
+  gas-station:
+    image: ghcr.io/toon-protocol/gas-station:release
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    environment:
+      NODE_NOSTR_SECRET_KEY: ${GAS_STATION_NOSTR_SECRET_KEY:?set GAS_STATION_NOSTR_SECRET_KEY in .env (64-char hex)}
+      HANDLER_PORT: '3300'
+      BLS_PORT: '3400'
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # ── The two chains. At least one must be set or the app refuses to
+      # boot: a gas station with no chain would answer nothing.
+      #
+      # kind:5096 — Solana. A DEDICATED fee-payer key: this one co-signs other
+      # people's transactions, so it is not the connector's settlement key
+      # (that is a file, mounted into a different container) and not a float
+      # for anything else.
+      GAS_STATION_SOLANA_SECRET_KEY: ${GAS_STATION_SOLANA_SECRET_KEY:-}
+      SOLANA_NETWORK: ${SOLANA_NETWORK:-devnet}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-}
+      GAS_STATION_CHANNEL_PROGRAM_ID: ${GAS_STATION_CHANNEL_PROGRAM_ID:-}
+      GAS_STATION_QUOTE_TTL_MS: ${GAS_STATION_QUOTE_TTL_MS:-}
+      # kind:5098 — EVM. A JSON array of {chainId, rpcUrl, forwarderAddress,
+      # tokenNetworkAddress, relayerPrivateKey}, one dedicated relayer wallet
+      # per chain. Adding a chain is an entry here, not a code change.
+      EVM_GAS_STATION_CONFIG_JSON: ${EVM_GAS_STATION_CONFIG_JSON:-}
+      EVM_GAS_STATION_QUOTE_TTL_MS: ${EVM_GAS_STATION_QUOTE_TTL_MS:-}
+      EVM_GAS_STATION_MAX_GAS: ${EVM_GAS_STATION_MAX_GAS:-}
+      # Node's default heap target assumes it owns the machine. This box is a
+      # 1GB nanode running five containers.
+      NODE_OPTIONS: --max-old-space-size=256
+    expose: ['3300', '3400']
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3400/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── The TLS edge ───────────────────────────────────────────────────────────
+  # Deliberately NOT Watchtower-labelled. nginx holds the resolver that lets
+  # every other container survive being recreated at a new address; recreating
+  # it on an upstream nginx:alpine push would be an unreviewed change to the
+  # one component whose job is to outlive the others.
+  nginx:
+    image: nginx:alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+  # Holds the renewal timer; not Watchtower-labelled, same reasoning.
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
+  # ── Unattended updates ─────────────────────────────────────────────────────
+  # `--label-enable` means it ignores every container that does not carry the
+  # enable label, so it only ever touches connector, gas-station and announce.
+  # Pinned, rather than floating on :latest — otherwise a future Watchtower
+  # release changes this box's deploy behaviour with nothing in git to point
+  # at (which is exactly the defect it exists to fix for everything else).
+  # Not labelled itself.
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    environment:
+      DOCKER_API_VERSION: '1.44'
+    command: ['--label-enable', '--interval', '60', '--cleanup']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # ── Discovery (opt-in) ─────────────────────────────────────────────────────
+  # Behind a compose profile because publishing a kind:10032 is a PAID write
+  # through another node's client edge: it needs a funded channel
+  # (ANNOUNCE_PAY_CHANNEL, which render.sh turns into the [announce] section).
+  # A box without one is reachable and serving, just not listed — a normal
+  # state to be in for a while, and not one that should leave a container
+  # crash-looping.
+  #
+  #   docker compose --profile announce up -d
+  #
+  # `connector announce` is a ONE-SHOT: it negotiates, signs and pays for one
+  # write, then exits. `restart: unless-stopped` on the bare subcommand would
+  # re-run it the instant it exits — a tight loop paying for a fresh announce
+  # as fast as the container can restart. Hence the sleep loop.
+  #
+  # It probes the through-edge before publishing: a Watchtower recreate
+  # restarts this and the connector in the same sweep, and firing a publish
+  # into a still-booting edge wastes a paid write.
+  #
+  # Runs the SAME image and the SAME connector.toml as the connector — the two
+  # must move together, or the older binary refuses to load a config the newer
+  # one wrote. That is why both carry the Watchtower label.
+  announce:
+    image: ghcr.io/toon-protocol/connector:rust-release
+    profiles: ['announce']
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -eu
+        THROUGH_URL="$${ANNOUNCE_THROUGH_URL:?set ANNOUNCE_THROUGH_URL in .env}"
+        REFRESH_SECS="$${ANNOUNCE_REFRESH_SECS:-240}"
+        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
+        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
+        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
+        wait_for_edge() {
+          waited=0
+          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
+            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
+              echo "[announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
+              return 1
+            fi
+            echo "[announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
+            sleep "$$READY_POLL_SECS"
+            waited=$$((waited + READY_POLL_SECS))
+          done
+          return 0
+        }
+        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+        while true; do
+          wait_for_edge || true
+          echo "[announce] publishing g.toon.gas via $$THROUGH_URL..."
+          if /usr/local/bin/connector announce \
+            --config /app/config/connector.toml \
+            "$$THROUGH_URL"; then
+            echo "[announce] OK -- g.toon.gas published; next refresh in $${REFRESH_SECS}s"
+            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+            SLEEP_SECS="$$REFRESH_SECS"
+          else
+            RC=$$?
+            echo "[announce] FAILED rc=$$RC -- g.toon.gas NOT published; retrying in $${BACKOFF_SECS}s"
+            SLEEP_SECS="$$BACKOFF_SECS"
+            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
+            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
+              BACKOFF_SECS="$$REFRESH_SECS"
+            fi
+          fi
+          sleep "$$SLEEP_SECS"
+        done
+    environment:
+      ANNOUNCE_THROUGH_URL: ${ANNOUNCE_THROUGH_URL:-}
+      ANNOUNCE_REFRESH_SECS: ${ANNOUNCE_REFRESH_SECS:-240}
+    volumes:
+      - ./connector.toml:/app/config/connector.toml:ro
+      - ./signer.key:/app/data/signer.key:ro
+      - ./settlement.key:/app/data/settlement.key:ro
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      - announce_state:/app/state
+    restart: unless-stopped
+
+volumes:
+  # The claim watermark. Back this up; losing it hands every payer their
+  # already-spent claims back as free service.
+  connector_state:
+  announce_state:
+  certbot_conf:
+  certbot_www:
