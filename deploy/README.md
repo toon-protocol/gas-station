@@ -54,6 +54,26 @@ The thing that actually needs the headroom is not serving traffic — it is
 Watchtower pulling a new image while every container is still resident. That is
 what the swap is for.
 
+Measured on the TOON devnet gas box (Linode `g6-nanode-1`, 1GB/1vCPU/25GB,
+Ubuntu 24.04) with all five containers up and serving:
+
+| | |
+|---|---|
+| app (node) | 85 MB |
+| watchtower | 19 MB |
+| certbot | 17 MB |
+| connector | 14 MB |
+| nginx | 4 MB |
+| **available** | **532 MB of 961** |
+| swap in use | 22 MB of 496 |
+| disk | 3.9 GB of 25 |
+
+Linode's Ubuntu image already ships a 496MB swap partition, so `bootstrap.sh`
+finds one and adds nothing. If free memory ever sits below ~200MB, or
+`docker inspect --format '{{.State.OOMKilled}}'` ever reports true after a
+Watchtower recreate, resize to the 2GB plan — it is an in-place resize plus a
+reboot, not a rebuild.
+
 ## Standing one up
 
 **Before you start** you need a host, two DNS A-records pointing at it —
