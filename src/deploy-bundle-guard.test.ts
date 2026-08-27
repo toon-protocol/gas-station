@@ -27,8 +27,11 @@ const read = (relativePath: string): string =>
 
 // ── The facts, in one place ─────────────────────────────────────────────────
 
-/** The ILP prefix this app is sold under. One name for one app. */
+/** The ILP prefix this app is sold under, and the relay's name for it. */
 const ROUTE_PREFIX = 'g.toon.gas';
+const RELAY_ROUTE_PREFIX = 'g.toon.relay.gas';
+/** The one immutable connector build this bundle runs. Bump here and in docker-compose.yml together. */
+const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-sha-c714551';
 /** Where the connector delivers a paid job. The `/gas` path is load-bearing. */
 const HANDLER_URL = 'http://gas-station:3300/gas';
 /** 0.001 USDC in the smallest unit of a 6-decimal asset. */
@@ -40,8 +43,11 @@ const EXPECTED_REGISTRY = '0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1';
 const EXPECTED_TOKEN = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
 /** ADR 0010: 6-decimal USDC everywhere. */
 const EXPECTED_DECIMALS = 6;
-/** The Solana payment-channel program the connector settles against. */
+/** The Solana payment-channel program the connector settles against, and the
+ *  mint the fleet settles in — the one the faucet can still mint (its
+ *  predecessor's mint authority is lost; connector's devnet-public.md). */
 const SOLANA_PROGRAM_ID = '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip';
+const SOLANA_TOKEN_MINT = '34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU';
 
 const connectorTemplate = read('deploy/connector.toml.template');
 const renderScript = read('deploy/render.sh');
@@ -58,6 +64,8 @@ const letsencryptScript = read('deploy/init-letsencrypt.sh');
 interface ConnectorConfig {
   client_edge_addr: string;
   state_dir: string;
+  peer_expose: string;
+  node: { addresses: string[]; http_endpoint: string; btp_endpoint: string };
   routes: { prefix: string; handler_url: string; price: number }[];
   settlement: {
     evm: { contract_address: string; token_address: string; decimals: number };
@@ -81,28 +89,69 @@ const compose = parseYaml(read('deploy/docker-compose.yml')) as unknown as {
 
 // ── The route ───────────────────────────────────────────────────────────────
 
-describe('the route the connector sells', () => {
-  it('terminates exactly one prefix', () => {
-    expect(connector.routes.map((r) => r.prefix)).toEqual([ROUTE_PREFIX]);
+describe('the routes the connector sells', () => {
+  it('terminates its own prefix and the name the relay forwards under', () => {
+    // A forward does not rewrite the destination: what the relay sends as
+    // `g.toon.relay.gas` arrives as `g.toon.relay.gas` and needs its own row.
+    expect(connector.routes.map((r) => r.prefix).sort()).toEqual(
+      [ROUTE_PREFIX, RELAY_ROUTE_PREFIX].sort()
+    );
   });
 
-  it('delivers to the app at its job path', () => {
+  it('delivers both to the app at its job path', () => {
     // A bare origin comes back F99 "app declined the delivery with HTTP 404" —
     // the app serves POST /gas and nothing at /.
-    expect(connector.routes[0]?.handler_url).toBe(HANDLER_URL);
+    for (const route of connector.routes) {
+      expect(route.handler_url).toBe(HANDLER_URL);
+    }
   });
 
-  it('is priced, not free', () => {
+  it('is priced, not free, and priced the same under both names', () => {
     // `price` is REQUIRED on a terminated route; write 0 deliberately if free
     // is what you mean. A gas station spends real value per job, so it is not.
-    expect(connector.routes[0]?.price).toBe(ROUTE_PRICE);
-    expect(connector.routes[0]?.price).toBeGreaterThan(0);
+    // And one handler at two prices is refused by the connector outright.
+    for (const route of connector.routes) {
+      expect(route.price).toBe(ROUTE_PRICE);
+      expect(route.price).toBeGreaterThan(0);
+    }
+  });
+
+  it('advertises every prefix it terminates', () => {
+    // A prefix this node terminates but never advertises is one no client can
+    // discover, and the relay's POST /peers reads exactly this list.
+    expect(connector.node.addresses.slice().sort()).toEqual(
+      connector.routes.map((r) => r.prefix).sort()
+    );
   });
 
   it('names the same service and port the compose file defines', () => {
     const url = new URL(connector.routes[0]?.handler_url ?? '');
     expect(Object.keys(compose.services)).toContain(url.hostname);
     expect(compose.services[url.hostname]?.expose?.map(String)).toContain(url.port);
+  });
+});
+
+// ── Peering ─────────────────────────────────────────────────────────────────
+
+describe('the peering the relay establishes', () => {
+  it('opens exactly the BTP carriage the [node] section publishes', () => {
+    // The relay dials the endpoint the self-description names; without a peer
+    // listener its packets are admitted as an ordinary client's.
+    expect(connector.peer_expose).toBe('btp');
+    expect(connector.node.btp_endpoint).toBe('wss://proxy.gas.${DOMAIN}/ilp/btp');
+    expect(connector.node.http_endpoint).toBe('https://proxy.gas.${DOMAIN}/ilp');
+  });
+
+  it('writes no [[peers]] row, so the runtime peering keeps its ownership', () => {
+    // A config-file row for the relay would refuse the runtime write for good
+    // (a durable row whose id config later claims is deleted, not shadowed).
+    expect(connectorTemplate).not.toMatch(/^\[\[peers\]\]/m);
+    expect(connectorTemplate).not.toMatch(/^\[\[peer_channels\]\]/m);
+  });
+
+  it('carries the BTP upgrade through nginx to the connector', () => {
+    expect(nginxTemplate).toContain('proxy_set_header Upgrade $http_upgrade');
+    expect(nginxTemplate).toMatch(/proxy\.gas\.\$\{DOMAIN\}\s+"http:\/\/connector:4000"/);
   });
 });
 
@@ -122,6 +171,7 @@ describe('settlement', () => {
     expect(connectorTemplate).not.toMatch(/^\[settlement\.solana\]/m);
     expect(renderScript).toMatch(/SETTLEMENT_SOLANA/);
     expect(renderScript).toContain(SOLANA_PROGRAM_ID);
+    expect(renderScript).toContain(SOLANA_TOKEN_MINT);
   });
 
   it('explains in the template why the Solana table is not there', () => {
@@ -131,33 +181,33 @@ describe('settlement', () => {
 
 // ── The connector schema this bundle targets ────────────────────────────────
 
-describe('the pinned connector schema', () => {
-  it('uses the [announce]/inline-[operator] spelling, not the newer one', () => {
-    // docker-compose pins `:rust-release`. On that build the announce section
-    // is `[announce]` and the operator secrets are inline; both change when
-    // the fleet promotes (connector#1165 / #1017). If this bundle is moved to
-    // a newer tag, these assertions are the checklist.
+describe('the pinned connector build', () => {
+  it('pins one immutable rust-sha- build, never the retired :rust-release pointer', () => {
+    // Nothing moves `:rust-release` any more (connector ADR 0068); a bundle
+    // following it stands still. The literal here and in docker-compose.yml
+    // are the two places a bump has to land, together.
+    const image = compose.services['connector']?.image;
+    expect(image).toBe(CONNECTOR_IMAGE);
+    expect(image).toMatch(/:rust-sha-[0-9a-f]{7}$/);
+    expect(read('deploy/docker-compose.yml')).not.toContain('rust-release');
+  });
+
+  it('speaks that build\'s schema: [node], no [announce], and a self-description instead of a sidecar', () => {
+    expect(connectorTemplate).toMatch(/^\[node\]/m);
+    expect(connectorTemplate).not.toMatch(/^\[announce\]/m);
+    expect(renderScript).not.toMatch(/\[announce\]/);
+    expect(compose.services['announce']).toBeUndefined();
+    expect(envExample).not.toMatch(/^ANNOUNCE_/m);
+  });
+
+  it('keeps the operator secrets inline, where render.sh substitutes them', () => {
     expect(connector.operator.bearer_token).toBe('${OPERATOR_BEARER_TOKEN}');
     expect(connector.operator.write_keys).toEqual(['${OPERATOR_WRITE_KEY}']);
-    // As a live KEY, not as prose — the migration note below mentions the
-    // newer spelling on purpose.
-    expect(connectorTemplate).not.toMatch(/^\s*bearer_token_file\s*=/m);
-    expect(renderScript).toMatch(/\[announce\]/);
-    expect(renderScript).not.toMatch(/^\[node\]/m);
   });
 
-  it('says out loud which tag it targets and what changes when that moves', () => {
-    expect(connectorTemplate).toMatch(/targets `:rust-release`/);
-    expect(connectorTemplate).toMatch(/\[node\]/);
-    expect(connectorTemplate).toMatch(/bearer_token_file/);
-  });
-
-  it('runs the same connector image for the connector and the announce sidecar', () => {
-    // They share connector.toml, so an older binary would refuse a config the
-    // newer one wrote. Both must move together — hence both Watchtower labels.
-    const image = compose.services['connector']?.image;
-    expect(image).toBe('ghcr.io/toon-protocol/connector:rust-release');
-    expect(compose.services['announce']?.image).toBe(image);
+  it('says out loud how the pin is bumped', () => {
+    expect(connectorTemplate).toMatch(/targets an exact `rust-sha-` build/);
+    expect(read('deploy/README.md')).toMatch(/^## Bumping the connector pin/m);
   });
 });
 
@@ -232,12 +282,11 @@ describe('hostnames agree across nginx, the certificate and .env.example', () =>
     }
   });
 
-  it('the announce endpoints use the public names, not the container address', () => {
+  it('the [node] endpoints use the public names, not the container address', () => {
     // Inside the container the node only ever sees 0.0.0.0:4000; these are the
     // facts it cannot introspect, which is the whole reason the section exists.
-    expect(renderScript).toMatch(/http_endpoint\s*=\s*"https:\/\/proxy\.gas\./);
-    expect(renderScript).toMatch(/btp_endpoint\s*=\s*"wss:\/\/proxy\.gas\./);
-    expect(renderScript).toMatch(/addresses\s*=\s*\["g\.toon\.gas"\]/);
+    expect(connectorTemplate).toMatch(/http_endpoint\s*=\s*"https:\/\/proxy\.gas\.\$\{DOMAIN\}\/ilp"/);
+    expect(connectorTemplate).toMatch(/btp_endpoint\s*=\s*"wss:\/\/proxy\.gas\.\$\{DOMAIN\}\/ilp\/btp"/);
   });
 });
 
@@ -316,13 +365,6 @@ describe('the app service', () => {
       if (name === 'LOG_LEVEL') continue;
       expect(envExample, `${name} is passed through but undocumented`).toContain(name);
     }
-  });
-
-  it('keeps the announce sidecar behind a profile', () => {
-    // Publishing an announce is a PAID write needing a funded channel. A box
-    // without one is reachable and serving, just not listed — that must not be
-    // a crash-looping container.
-    expect(compose.services['announce']?.profiles).toEqual(['announce']);
   });
 });
 

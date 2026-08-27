@@ -1,12 +1,11 @@
 # =============================================================================
-# The gas-station box — one host, five or six containers
+# The gas-station box — one host, five containers
 # =============================================================================
 #   nginx        the public TLS edge (the only thing bound to a public port)
 #   connector    the payment proxy: meters + settles, then proxies to the app
 #   gas-station  the job backend: POST /gas -> a signed, broadcast transaction
 #   certbot      renews the certificate
 #   watchtower   recreates the app containers when their tag moves
-#   announce     publishes the kind:10032 self-announce (profile: announce)
 #
 #   internet ──▶ nginx :443 ──┬──▶ connector :4000 ──▶ gas-station :3300 ──▶ chain
 #                             └──▶ gas-station :3400  (health)
@@ -23,7 +22,7 @@ services:
   # this to 0.0.0.0 would put the paid edge on the public internet past ufw
   # (docker's iptables rules bypass ufw — see README § Privacy invariant).
   connector:
-    image: ghcr.io/toon-protocol/connector:rust-release
+    image: ghcr.io/toon-protocol/connector:rust-sha-c714551
     labels:
       com.centurylinklabs.watchtower.enable: 'true'
     volumes:
@@ -111,7 +110,7 @@ services:
 
   # ── Unattended updates ─────────────────────────────────────────────────────
   # `--label-enable` means it ignores every container that does not carry the
-  # enable label, so it only ever touches connector, gas-station and announce.
+  # enable label, so it only ever touches connector and gas-station.
   # Pinned, rather than floating on :latest — otherwise a future Watchtower
   # release changes this box's deploy behaviour with nothing in git to point
   # at (which is exactly the defect it exists to fix for everything else).
@@ -125,91 +124,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
-  # ── Discovery (opt-in) ─────────────────────────────────────────────────────
-  # Behind a compose profile because publishing a kind:10032 is a PAID write
-  # through another node's client edge: it needs a funded channel
-  # (ANNOUNCE_PAY_CHANNEL, which render.sh turns into the [announce] section).
-  # A box without one is reachable and serving, just not listed — a normal
-  # state to be in for a while, and not one that should leave a container
-  # crash-looping.
-  #
-  #   docker compose --profile announce up -d
-  #
-  # `connector announce` is a ONE-SHOT: it negotiates, signs and pays for one
-  # write, then exits. `restart: unless-stopped` on the bare subcommand would
-  # re-run it the instant it exits — a tight loop paying for a fresh announce
-  # as fast as the container can restart. Hence the sleep loop.
-  #
-  # It probes the through-edge before publishing: a Watchtower recreate
-  # restarts this and the connector in the same sweep, and firing a publish
-  # into a still-booting edge wastes a paid write.
-  #
-  # Runs the SAME image and the SAME connector.toml as the connector — the two
-  # must move together, or the older binary refuses to load a config the newer
-  # one wrote. That is why both carry the Watchtower label.
-  announce:
-    image: ghcr.io/toon-protocol/connector:rust-release
-    profiles: ['announce']
-    labels:
-      com.centurylinklabs.watchtower.enable: 'true'
-    entrypoint: ['/bin/sh', '-c']
-    command:
-      - |
-        set -eu
-        THROUGH_URL="$${ANNOUNCE_THROUGH_URL:?set ANNOUNCE_THROUGH_URL in .env}"
-        REFRESH_SECS="$${ANNOUNCE_REFRESH_SECS:-240}"
-        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
-        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
-        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
-        wait_for_edge() {
-          waited=0
-          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
-            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
-              echo "[announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
-              return 1
-            fi
-            echo "[announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
-            sleep "$$READY_POLL_SECS"
-            waited=$$((waited + READY_POLL_SECS))
-          done
-          return 0
-        }
-        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
-        while true; do
-          wait_for_edge || true
-          echo "[announce] publishing g.toon.gas via $$THROUGH_URL..."
-          if /usr/local/bin/connector announce \
-            --config /app/config/connector.toml \
-            "$$THROUGH_URL"; then
-            echo "[announce] OK -- g.toon.gas published; next refresh in $${REFRESH_SECS}s"
-            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
-            SLEEP_SECS="$$REFRESH_SECS"
-          else
-            RC=$$?
-            echo "[announce] FAILED rc=$$RC -- g.toon.gas NOT published; retrying in $${BACKOFF_SECS}s"
-            SLEEP_SECS="$$BACKOFF_SECS"
-            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
-            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
-              BACKOFF_SECS="$$REFRESH_SECS"
-            fi
-          fi
-          sleep "$$SLEEP_SECS"
-        done
-    environment:
-      ANNOUNCE_THROUGH_URL: ${ANNOUNCE_THROUGH_URL:-}
-      ANNOUNCE_REFRESH_SECS: ${ANNOUNCE_REFRESH_SECS:-240}
-    volumes:
-      - ./connector.toml:/app/config/connector.toml:ro
-      - ./signer.key:/app/data/signer.key:ro
-      - ./settlement.key:/app/data/settlement.key:ro
-      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
-      - announce_state:/app/state
-    restart: unless-stopped
-
 volumes:
   # The claim watermark. Back this up; losing it hands every payer their
   # already-spent claims back as free service.
   connector_state:
-  announce_state:
   certbot_conf:
   certbot_www:

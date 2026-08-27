@@ -23,7 +23,6 @@ updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
 
    certbot  ──▶ renews the certificate
    watchtower ▶ recreates connector and gas-station when their tag moves
-   announce ──▶ (opt-in) publishes kind:10032 so clients can discover the above
 ```
 
 ## Files
@@ -175,11 +174,13 @@ a container when the tag it follows changes digest.
 | Container | Follows | Moves when |
 |---|---|---|
 | `gas-station` | `ghcr.io/toon-protocol/gas-station:release` | every green merge to `main` in this repo |
-| `connector`, `announce` | `ghcr.io/toon-protocol/connector:rust-release` | a **supervised promotion** in the connector repo, never automatically |
+| `connector` | `ghcr.io/toon-protocol/connector:rust-sha-<short>` — an immutable pin | never on its own: bumping the pin is a reviewed commit here (see below) |
 
 The difference is deliberate. This app's image is this repo's to move; the
-connector's is the fleet's, and auto-moving it on green main once pushed
-unvalidated builds to two live boxes in about sixty seconds.
+connector's is pinned to one immutable build, because nothing moves the old
+`:rust-release` pointer any more (connector ADR 0068 — a node repository pins
+the connector it runs, in one place, guarded there). Watchtower still carries
+the label so a bumped pin is picked up on the next `docker compose up -d`.
 
 `nginx` and `certbot` deliberately carry no Watchtower label. nginx holds the
 resolver that lets every other container survive being recreated at a new
@@ -206,20 +207,31 @@ and there is no environment-variable layer. After editing:
 The app's own configuration is environment, so it restarts the ordinary way:
 `docker compose up -d gas-station`.
 
-## Discovery is opt-in
+## Discovery, and the relay's peering
 
-Publishing a kind:10032 self-announce is how clients *find* this node. It is a
-paid write through another node's client edge, so it needs a funded payment
-channel — which is why it is off until you set `ANNOUNCE_PAY_CHANNEL` and the
-three variables beside it in `.env`. Then:
+`GET https://proxy.gas.<domain>/ilp` is this node's self-description: the
+prefixes it terminates, the URLs it is reachable on, its edge identity and its
+settlement addresses on both chains. That is how a client finds it and how a
+counterparty peers with it — there is no announce to publish and no sidecar to
+run.
+
+The relay peers with this node through the relay's own operator surface
+(`POST /peers` at this URL, connector ADR 0058): it reads the self-description,
+derives the payment channel from the two settlement addresses, opens it if
+absent, and dials the BTP endpoint. Packets it forwards arrive addressed to
+`g.toon.relay.gas`, which `connector.toml.template` terminates at the same app
+and price as `g.toon.gas`. This node's own side of the peering — the channel
+it pays the relay from — is established the same way from here:
 
 ```bash
-./render.sh                                # writes the [announce] section
-docker compose --profile announce up -d
+# from a shell holding the private half of OPERATOR_WRITE_KEY
+sign-write.sh -k operator-write.key -X POST -p /peers \
+  -b '{"id":"relay","url":"https://proxy.relay.devnet.toonprotocol.dev/ilp","fee":1,"max_packet_amount":100000,"chain":"solana"}' \
+  -u https://proxy.gas.<domain>
 ```
 
-A box without it is reachable and serving, just not listed. That is a normal
-state to be in for a while, and deliberately not a crash-looping container.
+(`sign-write.sh` is the connector repo's `docs/operators/sign-write.sh`.) Both
+sides' rows live in the connector's state volume, not in this file.
 
 ## Make it yours
 
@@ -270,17 +282,16 @@ the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
 
-## When the fleet moves past this tag
+## Bumping the connector pin
 
-`connector.toml.template` is written for `:rust-release` as promoted today.
-Two things change when the fleet promotes past connector#1165 and #1017, and
-both are refuse-to-start failures if they land in the wrong order:
+`docker-compose.yml` pins the connector to one immutable `rust-sha-` build, and
+`src/deploy-bundle-guard.test.ts` pins the same literal. To move:
 
-| Now | After |
-|---|---|
-| `[announce]` section + the `announce` container | `[node]` section; delete the container — the one-shot `connector announce` verb is gone and `GET /ilp` serves the self-description |
-| `[operator] bearer_token` / `write_keys` inline | `bearer_token_file` / `write_keys_file` pointing at mounted files |
+1. Read the connector's release notes for schema changes. The parser is
+   `deny_unknown_fields` and startup is fail-closed, so a key the new build
+   refuses is a refuse-to-start, never a degraded run.
+2. Change `connector.toml.template` first if the new build wants it, then the
+   tag in `docker-compose.yml` and the test literal, in one commit.
+3. On the box: `git pull && ./render.sh && docker compose up -d`.
 
-Land the config first, then move the tag. `src/deploy-bundle-guard.test.ts`
-asserts the current shape, so flip those assertions in the same commit and CI
-will tell you if the bundle and the tag ever disagree.
+To roll the connector back, pin the previous `rust-sha-` tag the same way.
