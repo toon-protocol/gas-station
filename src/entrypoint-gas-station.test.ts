@@ -292,8 +292,8 @@ describe('resolveEvmGasStationEnv', () => {
     // The live Base Sepolia forwarder and TokenNetwork, lowercased: a
     // real-world pair whose EIP-55 checksum is visibly different from the
     // input, so this asserts the normalization actually happened.
-    const lowerForwarder = '0xf1b0b8ba9ca90a0779c382fe4212a3d4c5646ee9';
-    const lowerTokenNetwork = '0xa79c3b1dbcea00a6d84735a134395d8ef6d6a478';
+    const lowerForwarder = '0x350fcd266f95b1f5b84944e0c7e06c16b837fcaa';
+    const lowerTokenNetwork = '0xe9e05dfecfe165266c88d73e61d483612651952a';
     const config = resolveEvmGasStationEnv({
       EVM_GAS_STATION_CONFIG_JSON: JSON.stringify([
         evmEntry({
@@ -305,8 +305,8 @@ describe('resolveEvmGasStationEnv', () => {
     expect(config?.chains).toHaveLength(1);
     const chain = config?.chains[0];
     expect(chain?.chainId).toBe(84532);
-    expect(chain?.forwarderAddress).toBe('0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9');
-    expect(chain?.tokenNetworkAddress).toBe('0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478');
+    expect(chain?.forwarderAddress).toBe('0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA');
+    expect(chain?.tokenNetworkAddress).toBe('0xe9E05dfecfe165266C88d73e61D483612651952a');
   });
 
   it('parses several chains — adding one is a config entry, not a code change', () => {
