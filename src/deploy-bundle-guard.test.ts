@@ -38,8 +38,8 @@ const HANDLER_URL = 'http://gas-station:3300/gas';
 const ROUTE_PRICE = 1000;
 /** The app's two ports. Neither may ever be host-published. */
 const PRIVATE_PORTS = ['3300', '3400'];
-/** Base Sepolia's ERC-2771 TokenNetworkRegistry and the fleet's USDC. */
-const EXPECTED_REGISTRY = '0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1';
+/** Base Sepolia's TokenNetworkRegistry (the 2026-08-28 ADR 0059 cutover's) and the fleet's USDC. */
+const EXPECTED_REGISTRY = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
 const EXPECTED_TOKEN = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
 /** ADR 0010: 6-decimal USDC everywhere. */
 const EXPECTED_DECIMALS = 6;
