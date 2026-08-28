@@ -320,6 +320,29 @@ function matchesDiscriminator(data: Uint8Array, disc: Uint8Array): boolean {
  *     one that DOES reference it is `dvm_key_misplaced` even when the op
  *     itself is permitted.
  */
+/**
+ * `JSON.stringify` for a value that came off the RPC.
+ *
+ * `@solana/kit` parses JSON-RPC numbers as `bigint`, and a Solana error is
+ * shaped `{"InstructionError":[3,{"Custom":6026}]}` — both of those arrive as
+ * bigints, and plain `JSON.stringify` throws `TypeError: Do not know how to
+ * serialize a BigInt` on them.
+ *
+ * Every caller below is BUILDING AN ERROR MESSAGE, which is the worst place to
+ * throw: the diagnosis is replaced by a worse one. The client gets an opaque
+ * `T00` naming a serialization detail instead of the program error, and at the
+ * execute site the `BlockhashNotFound` test that classifies a RETRYABLE
+ * failure never runs either — so an expired blockhash stops looking expired.
+ * Reporting a failure must not be able to fail.
+ */
+function renderRpcValue(value: unknown): string {
+  return (
+    JSON.stringify(value, (_key, v: unknown) =>
+      typeof v === 'bigint' ? v.toString() : v
+    ) ?? String(value)
+  );
+}
+
 export function inspectGasStationTransaction(
   wireBase64: string,
   policy: GasStationPolicy
@@ -873,7 +896,7 @@ export function createGasStationHandler(
         return failed(
           'quote',
           'simulation_failed',
-          `draft simulation error: ${JSON.stringify(sim.err)}; logs: ${sim.logs.slice(-4).join(' | ')}`
+          `draft simulation error: ${renderRpcValue(sim.err)}; logs: ${sim.logs.slice(-4).join(' | ')}`
         );
       }
       const post = sim.feePayerPostLamports;
@@ -968,7 +991,7 @@ export function createGasStationHandler(
       feePayer: policy.feePayer,
     });
     if (sim.err !== null && sim.err !== undefined) {
-      const rendered = JSON.stringify(sim.err);
+      const rendered = renderRpcValue(sim.err);
       const reason: GasStationFailureReason = rendered.includes('BlockhashNotFound')
         ? 'blockhash_expired'
         : 'simulation_failed';
@@ -1020,7 +1043,7 @@ export function createGasStationHandler(
       const status = await deps.rpc.getSignatureStatus(signature);
       if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
         if (status.err) {
-          return failed('execute', 'broadcast_failed', `transaction ${signature} landed but FAILED on-chain: ${JSON.stringify(status.err)}`);
+          return failed('execute', 'broadcast_failed', `transaction ${signature} landed but FAILED on-chain: ${renderRpcValue(status.err)}`);
         }
         slot = status.slot;
         confirmed = true;
