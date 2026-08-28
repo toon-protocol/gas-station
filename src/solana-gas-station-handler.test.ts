@@ -439,6 +439,7 @@ interface StubOptions {
   simPostLamports?: bigint | ((pre: bigint) => bigint);
   simErr?: unknown;
   confirm?: boolean;
+  statusErr?: unknown;
 }
 
 function makeStubDeps(opts: StubOptions = {}) {
@@ -461,7 +462,11 @@ function makeStubDeps(opts: StubOptions = {}) {
     }),
     getSignatureStatus: vi.fn(async () =>
       (opts.confirm ?? true)
-        ? { confirmationStatus: 'confirmed', err: null, slot: 42n }
+        ? {
+            confirmationStatus: 'confirmed',
+            err: opts.statusErr ?? null,
+            slot: 42n,
+          }
         : null
     ),
     getTransactionFee: vi.fn(async () => 10_000n),
@@ -746,6 +751,108 @@ describe('createGasStationHandler', () => {
     expect(res.status).toBe('ok');
     // delta 2_000_000 + 20% + 20_000 pad
     expect(BigInt(res.maxLamports)).toBe(2_420_000n);
+  });
+
+  // ── Reporting a failure must not be able to fail ───────────────────────────
+  //
+  // `@solana/kit` parses JSON-RPC numbers as bigint, so a real Solana error
+  // arrives as `{InstructionError: [3n, {Custom: 6026n}]}`. These paths used
+  // plain `JSON.stringify`, which throws on a bigint — from inside the code
+  // BUILDING the error message. The caller then got an opaque
+  // `T00: Do not know how to serialize a BigInt` instead of the reason, and
+  // the execute path lost its `blockhash_expired` classification with it.
+  describe('an RPC error carrying bigints still reports its reason', () => {
+    /** Exactly the shape kit hands back for `NotNftHolder` at instruction 3. */
+    const anchorErr = { InstructionError: [3n, { Custom: 6026n }] };
+
+    it('quote: a failed draft simulation reports simulation_failed, with the code', async () => {
+      const { handler } = makeHandler({ simErr: anchorErr });
+      const { address: client } = await clientKeyPair();
+      const draft = await buildTx([antIxReferencing(client, true)]);
+      const res = decodeReceipt<GasStationFailureReceipt>(
+        await handler(ctxFor(jobEvent({ phase: 'quote', transaction: draft })))
+      );
+      expect(res).toMatchObject({ status: 'failed', reason: 'simulation_failed' });
+      expect(res.detail).toContain('6026');
+      expect(res.detail).toContain('InstructionError');
+      expect(res.detail).not.toContain('serialize a BigInt');
+    });
+
+    it('execute: a failed simulation reports simulation_failed, with the code', async () => {
+      const { handler } = makeHandler();
+      const { quote, wire } = await quoteThenTx(handler);
+      const { handler: failing } = makeHandler({ simErr: anchorErr });
+      // Re-quote on the failing stub so the quoteId is one it knows.
+      const q2 = decodeReceipt<GasStationQuoteReceipt>(
+        await failing(ctxFor(jobEvent({ phase: 'quote' })))
+      );
+      const res = decodeReceipt<GasStationFailureReceipt>(
+        await failing(
+          ctxFor(
+            jobEvent({
+              phase: 'execute',
+              transaction: await buildTx(
+                [antIxReferencing((await clientKeyPair()).address, true)],
+                { blockhash: q2.recentBlockhash }
+              ),
+              quoteId: q2.quoteId,
+              idempotencyKey: 'idem-bigint-sim',
+            })
+          )
+        )
+      );
+      expect(res).toMatchObject({ status: 'failed', reason: 'simulation_failed' });
+      expect(res.detail).toContain('6026');
+      expect(quote.quoteId).not.toBe(q2.quoteId);
+      void wire;
+    });
+
+    // The classification, not just the message: this decides whether the
+    // caller knows to re-quote and retry.
+    it('execute: BlockhashNotFound is still classified blockhash_expired', async () => {
+      const { handler } = makeHandler({
+        simErr: { BlockhashNotFound: 1n },
+      });
+      const quote = decodeReceipt<GasStationQuoteReceipt>(
+        await handler(ctxFor(jobEvent({ phase: 'quote' })))
+      );
+      const res = decodeReceipt<GasStationFailureReceipt>(
+        await handler(
+          ctxFor(
+            jobEvent({
+              phase: 'execute',
+              transaction: await buildTx(
+                [antIxReferencing((await clientKeyPair()).address, true)],
+                { blockhash: quote.recentBlockhash }
+              ),
+              quoteId: quote.quoteId,
+              idempotencyKey: 'idem-bigint-blockhash',
+            })
+          )
+        )
+      );
+      expect(res.reason).toBe('blockhash_expired');
+    });
+
+    it('execute: a landed-but-failed transaction reports broadcast_failed', async () => {
+      const { handler } = makeHandler({ statusErr: anchorErr });
+      const { quote, wire } = await quoteThenTx(handler);
+      const res = decodeReceipt<GasStationFailureReceipt>(
+        await handler(
+          ctxFor(
+            jobEvent({
+              phase: 'execute',
+              transaction: wire,
+              quoteId: quote.quoteId,
+              idempotencyKey: 'idem-bigint-status',
+            })
+          )
+        )
+      );
+      expect(res).toMatchObject({ status: 'failed', reason: 'broadcast_failed' });
+      expect(res.detail).toContain('6026');
+      expect(res.detail).not.toContain('serialize a BigInt');
+    });
   });
 
   it('wrong kind / missing phase are transport rejects (F00)', async () => {
