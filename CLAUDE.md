@@ -16,8 +16,9 @@ private).
 `deploy/` **is** a gas-station box, not a sketch of one: nginx/TLS, connector,
 the app, certbot, Watchtower and an opt-in announce sidecar, installed by
 `deploy/bootstrap.sh` on a fresh Ubuntu host. It is sized for a 1GB host. The
-connector image is the fleet promotion tag
-`ghcr.io/toon-protocol/connector:rust-release` with `connector.toml`
+connector image is an immutable `ghcr.io/toon-protocol/connector:rust-sha-<short>`
+pin (bumped by commit together with the literal in `src/deploy-bundle-guard.test.ts`
+— connector ADR 0068; nothing moves `:rust-release` any more) with `connector.toml`
 bind-mounted. Config files are rendered from committed `*.template` files by
 `deploy/render.sh`; the rendered output and all key material are gitignored.
 `src/deploy-bundle-guard.test.ts` asserts the bundle stays consistent.
