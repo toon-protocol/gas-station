@@ -31,7 +31,7 @@ const read = (relativePath: string): string =>
 const ROUTE_PREFIX = 'g.toon.gas';
 const RELAY_ROUTE_PREFIX = 'g.toon.relay.gas';
 /** The one immutable connector build this bundle runs. Bump here and in docker-compose.yml together. */
-const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-sha-c714551';
+const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.08.28.1';
 /** Where the connector delivers a paid job. The `/gas` path is load-bearing. */
 const HANDLER_URL = 'http://gas-station:3300/gas';
 /** 0.001 USDC in the smallest unit of a 6-decimal asset. */
