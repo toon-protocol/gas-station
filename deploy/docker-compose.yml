@@ -22,7 +22,7 @@ services:
   # this to 0.0.0.0 would put the paid edge on the public internet past ufw
   # (docker's iptables rules bypass ufw — see README § Privacy invariant).
   connector:
-    image: ghcr.io/toon-protocol/connector:rust-sha-c714551
+    image: ghcr.io/toon-protocol/connector:rust-2026.08.28.1
     labels:
       com.centurylinklabs.watchtower.enable: 'true'
     volumes:
