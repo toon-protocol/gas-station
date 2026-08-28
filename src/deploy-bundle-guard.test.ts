@@ -184,13 +184,23 @@ describe('settlement', () => {
 // ── The connector schema this bundle targets ────────────────────────────────
 
 describe('the pinned connector build', () => {
-  it('pins one immutable rust-sha- build, never the retired :rust-release pointer', () => {
+  it('pins one immutable build -- a rust-sha- build or a rust-<release handle> -- never a moving tag', () => {
     // Nothing moves `:rust-release` any more (connector ADR 0068); a bundle
     // following it stands still. The literal here and in docker-compose.yml
-    // are the two places a bump has to land, together.
+    // are the two places a bump has to land, together, and
+    // .github/workflows/adopt-connector-release.yml is what lands both when
+    // the connector cuts a release.
+    //
+    // TWO shapes are accepted, because immutability is the property that
+    // actually matters here, not the spelling: `rust-sha-<commit>`, stamped
+    // on every connector build, and `rust-<YYYY.MM.DD.N>`, stamped on a cut
+    // release. Nothing ever repoints either. A moving tag -- `:rust-release`,
+    // `:rust-main`, `:latest` -- is what this rejects, because it would make
+    // the pin a pointer someone else controls and put an unreviewed build on
+    // this box.
     const image = compose.services['connector']?.image;
     expect(image).toBe(CONNECTOR_IMAGE);
-    expect(image).toMatch(/:rust-sha-[0-9a-f]{7}$/);
+    expect(image).toMatch(/:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/);
     expect(read('deploy/docker-compose.yml')).not.toContain('rust-release');
   });
 
@@ -247,7 +257,7 @@ describe('the pinned connector build', () => {
   });
 
   it('says out loud how the pin is bumped', () => {
-    expect(connectorTemplate).toMatch(/targets an exact `rust-sha-` build/);
+    expect(connectorTemplate).toMatch(/targets an exact, immutable build/);
     expect(read('deploy/README.md')).toMatch(/^## Bumping the connector pin/m);
   });
 });
