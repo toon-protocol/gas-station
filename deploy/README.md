@@ -30,15 +30,16 @@ updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The containers above. The only file that names an image tag. |
-| `connector.toml.template` | The payment proxy's config: what this node sells, at what price, and how it settles. Rendered to `connector.toml`. |
+| `connector.toml.template` | The payment proxy's config: what this node sells, at what price, and how it settles. Rendered to `connector.toml`. It names key and credential PATHS only, so it holds no secret. |
 | `nginx/node.conf.template` | The TLS edge. Rendered to `nginx/conf.d/node.conf`. |
-| `render.sh` | Fills both templates in from `.env`. |
+| `render.sh` | Fills the templates in from `.env`, and writes the operator surface's two credential files — `operator-bearer.token` and `operator-write.keys` — from `OPERATOR_BEARER_TOKEN` and `OPERATOR_WRITE_KEY`. |
 | `bootstrap.sh` | Fresh-host install: firewall, swap, docker, keys, render, start, TLS. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
 
-`.env`, the rendered `connector.toml`, `nginx/conf.d/` and all key material are
-gitignored. **Only templates are committed.**
+`.env`, the rendered `connector.toml`, `operator-bearer.token`,
+`operator-write.keys`, `nginx/conf.d/` and all key material are gitignored.
+**Only templates are committed.**
 
 ## What this box is sized for
 
@@ -153,7 +154,9 @@ the caller paying in something else.
 ## Checking it works
 
 ```bash
-docker compose ps                              # every service up, gas-station healthy
+docker compose ps                              # every service up, connector and gas-station healthy
+# the connector's healthcheck is GET /ilp/identity — 200 only once it is
+# serving AND has read its signer key, which "Up" alone does not prove
 curl https://gas.<domain>/health               # {"status":"ok","handlerKinds":[5096,5098],...}
 curl https://proxy.gas.<domain>/ilp/identity   # the signer pubkey clients seal to
 ```

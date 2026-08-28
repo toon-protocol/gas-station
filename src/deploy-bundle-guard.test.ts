@@ -70,7 +70,7 @@ interface ConnectorConfig {
   settlement: {
     evm: { contract_address: string; token_address: string; decimals: number };
   };
-  operator: { bearer_token: string; write_keys: string[] };
+  operator: { bearer_token_file: string; write_keys_file: string };
 }
 
 const connector = parseToml(connectorTemplate) as unknown as ConnectorConfig;
@@ -79,6 +79,8 @@ interface ComposeService {
   image?: string;
   ports?: (string | number)[];
   expose?: (string | number)[];
+  volumes?: string[];
+  healthcheck?: { test?: string[]; interval?: string; retries?: number };
   environment?: Record<string, string>;
   labels?: Record<string, string>;
   profiles?: string[];
@@ -200,9 +202,48 @@ describe('the pinned connector build', () => {
     expect(envExample).not.toMatch(/^ANNOUNCE_/m);
   });
 
-  it('keeps the operator secrets inline, where render.sh substitutes them', () => {
-    expect(connector.operator.bearer_token).toBe('${OPERATOR_BEARER_TOKEN}');
-    expect(connector.operator.write_keys).toEqual(['${OPERATOR_WRITE_KEY}']);
+  it('names the operator credentials by path, never inline', () => {
+    // File-valued, like every other credential this config names. Inline
+    // values made the rendered connector.toml itself a secret; paths mean the
+    // secrets are the two files render.sh writes, and the config is just
+    // config — the same shape the relay and store bundles run.
+    expect(connector.operator.bearer_token_file).toBe(
+      '/app/data/operator-bearer.token'
+    );
+    expect(connector.operator.write_keys_file).toBe(
+      '/app/data/operator-write.keys'
+    );
+    // The inline spelling must not come back: it would put a live credential
+    // into the rendered file again.
+    expect(connectorTemplate).not.toMatch(/^bearer_token\s*=/m);
+    expect(connectorTemplate).not.toMatch(/^write_keys\s*=/m);
+  });
+
+  it('mounts both operator credential files read-only where the config names them', () => {
+    // A path the config names but the compose file does not mount is a
+    // refuse-to-start: the connector reads the section at boot, fail-closed.
+    const volumes = compose.services['connector']?.volumes ?? [];
+    for (const file of ['operator-bearer.token', 'operator-write.keys']) {
+      expect(
+        volumes,
+        `connector must mount ./${file} at /app/data/${file} read-only`
+      ).toContain(`./${file}:/app/data/${file}:ro`);
+    }
+  });
+
+  it('proves the connector is SERVING, not merely up', () => {
+    // `docker ps` showing "Up" says the process exists. GET /ilp/identity is
+    // unauthenticated and answers 200 only once the listener is bound and the
+    // signer key file has been read.
+    const healthcheck = compose.services['connector']?.healthcheck;
+    expect(healthcheck, 'the connector service needs a healthcheck').toBeDefined();
+    const test = (healthcheck?.test ?? []).join(' ');
+    expect(test).toContain('http://127.0.0.1:4000/ilp/identity');
+    // 127.0.0.1, never localhost: the listener is IPv4-only, and "localhost"
+    // in a container can resolve to ::1, where nothing answers.
+    expect(test, 'localhost can resolve to ::1 in a container').not.toContain(
+      'localhost'
+    );
   });
 
   it('says out loud how the pin is bumped', () => {
@@ -305,23 +346,47 @@ describe('rendering', () => {
     }
   });
 
-  it('writes the rendered config 0600 and hands it to the container uid', () => {
-    // It carries the operator bearer token inline, so it is a secret; and the
-    // container runs as uid 10001, so a root-owned 0600 file is unreadable to
-    // it — "Permission denied", then a restart loop.
-    expect(renderScript).toMatch(/chmod 600 connector\.toml/);
+  it('writes the operator credential files from the same .env variables', () => {
+    // The variable names did not change — operators already have them set on
+    // the boxes; only where the values land did.
+    expect(renderScript).toMatch(
+      /\$\{OPERATOR_BEARER_TOKEN\}.*>\s*operator-bearer\.token/s
+    );
+    expect(renderScript).toContain('${OPERATOR_WRITE_KEY}');
+    expect(renderScript).toContain('> operator-write.keys');
+  });
+
+  it('writes every rendered file 0600 and hands them to the container uid', () => {
+    // The two operator files are the secrets now; connector.toml is only
+    // paths, and stays 0600 because it costs nothing. The container runs as
+    // uid 10001, so a root-owned 0600 file is unreadable to it — "Permission
+    // denied", then a restart loop.
+    expect(renderScript).toMatch(
+      /chmod 600 connector\.toml operator-bearer\.token operator-write\.keys/
+    );
     expect(renderScript).toMatch(/chown "\$\{CONNECTOR_UID:-10001\}/);
+    expect(renderScript).toMatch(/not running as root/);
   });
 
   it('keeps every rendered file and every secret out of git', () => {
     const ignored = read('deploy/.gitignore');
-    for (const entry of ['.env', 'connector.toml', 'nginx/conf.d/', '*.key', '*.secret']) {
+    for (const entry of [
+      '.env',
+      'connector.toml',
+      'operator-bearer.token',
+      'operator-write.keys',
+      'nginx/conf.d/',
+      '*.key',
+      '*.secret',
+    ]) {
       expect(ignored).toContain(entry);
     }
   });
 
   it('commits only templates — no rendered output is tracked', () => {
     expect(() => read('deploy/connector.toml')).toThrow();
+    expect(() => read('deploy/operator-bearer.token')).toThrow();
+    expect(() => read('deploy/operator-write.keys')).toThrow();
     expect(() => read('deploy/nginx/conf.d/node.conf')).toThrow();
   });
 });
@@ -391,8 +456,11 @@ describe('bootstrap', () => {
 
   it('generates every key file the compose file mounts', () => {
     const mounted = [
-      ...JSON.stringify(compose.services['connector']?.['volumes' as keyof ComposeService] ?? [])
-        .matchAll(/\.\/([a-z-]+\.key)/g),
+      // The trailing colon is load-bearing: without it `./operator-write.keys`
+      // matches as `operator-write.key`, a file nothing generates.
+      ...JSON.stringify(compose.services['connector']?.volumes ?? []).matchAll(
+        /\.\/([a-z-]+\.key):/g
+      ),
     ].map((m) => m[1]);
     expect(mounted.length).toBeGreaterThan(0);
     for (const file of mounted) {
