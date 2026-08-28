@@ -19,20 +19,18 @@
 #     exception is [operator] below, and that is a limitation of the pinned
 #     connector rather than a preference.
 #
-# ── This file targets `:rust-release` ────────────────────────────────────────
-# `docker-compose.yml` pins the connector to the fleet's promotion tag
-# `:rust-release`. Two keys here are written the way THAT build wants them,
-# and both change when the fleet promotes past connector#1165 / #1017:
+# ── This file targets an exact `rust-sha-` build ────────────────────────────
+# `docker-compose.yml` pins the connector to one immutable `rust-sha-` tag.
+# It used to follow the fleet's `:rust-release` pointer; nothing moves that
+# pointer any more (connector ADR 0068 — a node repository pins the connector
+# it runs, in one place, guarded there), so following it meant standing still.
 #
-#     [announce]        -> becomes [node], and the announce sidecar is deleted
-#                          (the one-shot `connector announce` verb is gone;
-#                          `GET /ilp` serves the self-description instead)
-#     [operator]        -> bearer_token / write_keys become
-#                          bearer_token_file / write_keys_file
-#
-# deploy/README.md § "When the fleet moves past this tag" has the checklist,
-# and src/deploy-bundle-guard.test.ts fails CI if this file and that tag ever
-# disagree.
+# Bumping the pin is a reviewed commit here: change the image tag in
+# docker-compose.yml and the matching literal in
+# src/deploy-bundle-guard.test.ts together, land this file's changes FIRST if
+# the new build wants a different schema, then move the tag. The parser is
+# `deny_unknown_fields` and startup is fail-closed, so a schema drift under you
+# is a refuse-to-start, never a degraded run.
 # =============================================================================
 
 # The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
@@ -44,6 +42,13 @@ client_edge_addr = "0.0.0.0:4000"
 # mounted volume: a watermark that dies with the container hands every payer
 # their spent claims back as free service.
 state_dir = "/app/state"
+
+# Which peer carriage this node listens on. The relay establishes a peering
+# with this node over the operator surface (connector ADR 0058) and dials the
+# BTP endpoint `[node]` publishes below; without this line no peer listener is
+# mounted at all and the relay's packets would be admitted as an ordinary
+# client's. "btp" opens exactly that one carriage on the same :4000 socket.
+peer_expose = "btp"
 
 # This node's signing identity. `GET /ilp/identity` answers with this key, and
 # every gift-wrapped packet is sealed to it.
@@ -86,6 +91,18 @@ key_file = "/app/data/signer.key"
 # the float; raise the price if a job costs you more than it earns.
 [[routes]]
 prefix      = "g.toon.gas"
+handler_url = "http://gas-station:3300/gas"
+price       = 1000
+
+# The same app under the relay's name for it. The relay forwards
+# `g.toon.relay.gas` here over the peering it established, and a forward does
+# not rewrite the destination — packets arrive addressed to this prefix and
+# need a route of their own. Priced identically to `g.toon.gas` because the
+# two share a `handler_url`, and the connector refuses a config where one
+# handler is reachable at two prices (the cheaper door would take every
+# packet).
+[[routes]]
+prefix      = "g.toon.relay.gas"
 handler_url = "http://gas-station:3300/gas"
 price       = 1000
 
@@ -135,36 +152,50 @@ key_file = "/app/data/settlement.key"
 # mounted at all (404, not 401) — which also means no way to redeem what you
 # have earned, so it is not optional in practice.
 #
-# On the pinned tag these are INLINE values, so the rendered connector.toml is
-# a secret: render.sh writes it 0600 and .gitignore keeps it out of git. Only
-# the template is committed. (On a newer connector they become *_file keys and
-# this stops being true.)
+# These are INLINE values, so the rendered connector.toml is a secret:
+# render.sh writes it 0600 and .gitignore keeps it out of git. Only the
+# template is committed. The connector also accepts `bearer_token_file` /
+# `write_keys_file` paths; inline is kept here so a render needs no extra
+# files, and the rendered file is already treated as a secret.
+#
+# `write_keys` is the allowlist of RFC 9421 signing keys for operator WRITES —
+# `POST /peers`, `POST /routes/peers`, `POST /channels/:id/fund`. The private
+# half never lives on this box. To sign one from a shell, use the connector
+# repo's docs/operators/sign-write.sh.
 [operator]
 bearer_token = "${OPERATOR_BEARER_TOKEN}"
 write_keys   = ["${OPERATOR_WRITE_KEY}"]
 
 
-# ── No [[peers]] ─────────────────────────────────────────────────────────────
-# This node is client-edge-only. It accepts no inbound peering and dials none:
-# another TOON node reaches this gas station the way anybody on the open
-# internet does, by paying its client edge. That is a deliberate choice, not a
-# gap — a peering is a bilateral arrangement needing a shared credential and a
-# channel on BOTH sides, and nothing about paying someone's gas needs one.
+# ── Peering: established by the relay, at runtime ───────────────────────────
+# No `[[peers]]` table, and none should be added: the relay peers with this
+# node through ITS operator surface — `POST /peers` at this node's URL reads
+# the `[node]` self-description below, derives the payment channel from the
+# two settlement addresses (ADR 0059), opens it on chain if absent, and dials
+# the BTP endpoint. This node's side of the same channel is bound the same way
+# in reverse (`POST /peers` here naming the relay's URL), and the rows live in
+# the state volume (`runtime-peers.json`), not in this file.
 #
-# The shape, if you ever do want one:
+# A `[[peers]]` row for the relay here would take that peering away from the
+# operator surface for good: a runtime write is refused when the config file
+# owns the id, and a durable runtime row whose id config later claims is
+# deleted, not shadowed.
+
+
+# ── What this node says about itself ────────────────────────────────────────
+# The facts a node cannot introspect: the prefixes it terminates and the
+# public URLs it is reachable on. `GET /ilp` serves them as the
+# self-description a counterparty's `POST /peers` reads. Both endpoints are
+# the PUBLIC names — inside the container the node only ever sees
+# 0.0.0.0:4000 — and nginx carries `/ilp/btp`'s WebSocket upgrade to the
+# connector.
 #
-#   peer_expose = "btp"
-#
-#   [[peers]]
-#   id         = "somebody"
-#   credential = { secret_file = "/app/data/somebody.secret" }
-#
-#   [[peer_channels]]
-#   peer_id          = "somebody"
-#   channel_id       = "0x..."
-#   counterparty_key = "0x..."
-#   chain_id         = 84532
-#   token_network    = "0x..."
+# `addresses` lists every prefix terminated above: a route this node
+# terminates but does not advertise is one no client can discover.
+[node]
+addresses     = ["g.toon.gas", "g.toon.relay.gas"]
+http_endpoint = "https://proxy.gas.${DOMAIN}/ilp"
+btp_endpoint  = "wss://proxy.gas.${DOMAIN}/ilp/btp"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
