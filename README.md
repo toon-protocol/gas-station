@@ -27,7 +27,14 @@ claim or settlement logic in this process, and there must never be — claim
 validation lives only in the connector.
 
 - **Deploying it:** [`deploy/`](./deploy) is a complete box — payment proxy,
-  TLS, unattended updates — that runs on a $5 1GB host.
+  TLS, unattended updates — that runs on a $5 1GB host. Both halves update
+  themselves: the app on every green `main`, and the connector when the
+  connector repo cuts a **release**, which
+  [`.github/workflows/adopt-connector-release.yml`](.github/workflows/adopt-connector-release.yml)
+  adopts only after booting that candidate against this bundle's own rendered
+  `connector.toml`, and which the box then applies on its own timer
+  ([`deploy/auto-apply.sh`](./deploy/auto-apply.sh)). See
+  [`deploy/README.md`](./deploy/README.md) § "Following connector releases".
 - **The code:** `src/solana-gas-station-handler.ts` and
   `src/evm-gas-station-handler.ts` carry the full security argument in their
   module comments. Start there.
