@@ -29,11 +29,13 @@ const read = (relativePath: string): string =>
 
 /** The ILP prefix this app is sold under, and the relay's name for it. */
 const ROUTE_PREFIX = 'g.toon.gas';
+const QUOTE_ROUTE_PREFIX = 'g.toon.gas.quote';
 const RELAY_ROUTE_PREFIX = 'g.toon.relay.gas';
 /** The one immutable connector build this bundle runs. Bump here and in docker-compose.yml together. */
 const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.08.28.1';
 /** Where the connector delivers a paid job. The `/gas` path is load-bearing. */
-const HANDLER_URL = 'http://gas-station:3300/gas';
+const EXECUTE_HANDLER_URL = 'http://gas-station:3300/gas/execute';
+const QUOTE_HANDLER_URL = 'http://gas-station:3300/gas/quote';
 /** 0.001 USDC in the smallest unit of a 6-decimal asset. */
 const ROUTE_PRICE = 1000;
 /** The app's two ports. Neither may ever be host-published. */
@@ -92,30 +94,38 @@ const compose = parseYaml(read('deploy/docker-compose.yml')) as unknown as {
 // ── The route ───────────────────────────────────────────────────────────────
 
 describe('the routes the connector sells', () => {
-  it('terminates its own prefix and the name the relay forwards under', () => {
+  it('terminates its own prefix, a quote prefix, and the name the relay forwards under', () => {
     // A forward does not rewrite the destination: what the relay sends as
     // `g.toon.relay.gas` arrives as `g.toon.relay.gas` and needs its own row.
     expect(connector.routes.map((r) => r.prefix).sort()).toEqual(
-      [ROUTE_PREFIX, RELAY_ROUTE_PREFIX].sort()
+      [ROUTE_PREFIX, QUOTE_ROUTE_PREFIX, RELAY_ROUTE_PREFIX].sort()
     );
   });
 
-  it('delivers both to the app at its job path', () => {
+  it('delivers executes to the execute door and quotes to the quote door', () => {
     // A bare origin comes back F99 "app declined the delivery with HTTP 404" —
-    // the app serves POST /gas and nothing at /.
-    for (const route of connector.routes) {
-      expect(route.handler_url).toBe(HANDLER_URL);
-    }
+    // the app serves POST /gas, /gas/quote and /gas/execute and nothing at /.
+    // The two phases sit on two handler_urls so they can be priced apart; a
+    // route on the bare /gas door would be one price for both again.
+    const byPrefix = new Map(connector.routes.map((r) => [r.prefix, r.handler_url]));
+    expect(byPrefix.get(QUOTE_ROUTE_PREFIX)).toBe(QUOTE_HANDLER_URL);
+    expect(byPrefix.get(ROUTE_PREFIX)).toBe(EXECUTE_HANDLER_URL);
+    expect(byPrefix.get(RELAY_ROUTE_PREFIX)).toBe(EXECUTE_HANDLER_URL);
   });
 
-  it('is priced, not free, and priced the same under both names', () => {
+  it('is priced, not free, and one handler_url is never at two prices', () => {
     // `price` is REQUIRED on a terminated route; write 0 deliberately if free
     // is what you mean. A gas station spends real value per job, so it is not.
     // And one handler at two prices is refused by the connector outright.
+    const priceByHandler = new Map<string, number>();
     for (const route of connector.routes) {
-      expect(route.price).toBe(ROUTE_PRICE);
       expect(route.price).toBeGreaterThan(0);
+      const seen = priceByHandler.get(route.handler_url);
+      if (seen !== undefined) expect(route.price).toBe(seen);
+      priceByHandler.set(route.handler_url, route.price);
     }
+    // This devnet box settles in play money, so the split is not priced here.
+    expect(priceByHandler.get(EXECUTE_HANDLER_URL)).toBe(ROUTE_PRICE);
   });
 
   it('advertises every prefix it terminates', () => {

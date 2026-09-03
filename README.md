@@ -100,7 +100,8 @@ something that is not true here:
   "protocol": "nip90-over-ilp",
   "inputEncoding": "param-tags",
   "resultDelivery": "ilp-fulfill-body",
-  "refusals": "in-band"
+  "refusals": "in-band",
+  "handlerPaths": { "any": "/gas", "quote": "/gas/quote", "execute": "/gas/execute" }
 }
 ```
 
@@ -248,6 +249,52 @@ The vocabularies are closed sets — `GasStationFailureReason` and
 - `confirmation_timeout` — broadcast, not confirmed in time. **Retry with the
   same `idempotencyKey`.**
 
+## Pricing the two phases apart
+
+The connector prices per **route**, and a route is a `handler_url`. A quote
+costs this node nothing; an execute costs it real native token, up to the
+per-job ceiling, and the two differ a hundredfold job to job (a fee-only
+transaction is ~5,000 lamports, an ANT spawn ~12,000,000). Behind one door
+they are one price: either a free quote costs the caller what an execute does,
+or an execute is priced like a free quote and the station is a faucet.
+
+So the app serves three doors, advertised under `transport.handlerPaths`:
+
+| path | admits | for |
+|---|---|---|
+| `/gas/quote` | `phase=quote` only | a route priced at next to nothing |
+| `/gas/execute` | `phase=execute` only | a route priced at what the ceiling buys |
+| `/gas` | either | one price for both — the original shape, still supported |
+
+A phase-scoped door refuses the other phase as **F00**, a transport reject:
+no handler runs and no gas moves. Whether the connector still charges for the
+refused packet is its rule, not this app's (the current build does: a reject
+is an answer, connector#1028), and it charges the price of the door that
+refused, so an execute pushed through the quote route pays the quote price and
+gets nothing. The operator terminates two routes:
+
+```toml
+[[routes]]
+prefix      = "g.example.gas.quote"
+handler_url = "http://gas-station:3300/gas/quote"
+price       = 1000
+
+[[routes]]
+prefix      = "g.example.gas"
+handler_url = "http://gas-station:3300/gas/execute"
+price       = 1750000   # ≈ what GAS_STATION_MAX_LAMPORTS_CEILING buys today
+```
+
+and sets `GAS_STATION_MAX_LAMPORTS_CEILING` to what that execute price buys,
+so no single job can cost the float more than its caller paid for it. This is
+as far as per-route pricing goes: an execute still pays the ceiling whether it
+lands a 5,000-lamport transfer or a 16,000,000-lamport spawn. Pricing a job at
+what its quote said needs the connector to enforce an amount the app names,
+which is a connector change and tracked there.
+
+Learned on the first mainnet deployment (2026-09-03): one door at a flat
+500,000 was the only honest number available, and it overcharged every quote.
+
 ## Configuration
 
 Everything is environment. Full documentation lives in
@@ -262,6 +309,7 @@ comment and in [`deploy/.env.example`](./deploy/.env.example).
 | `SOLANA_NETWORK` / `SOLANA_RPC_URL` | `devnet` (default) or `mainnet`; your own RPC if you have one |
 | `GAS_STATION_CHANNEL_PROGRAM_ID` | enables mitigation (e) for the TOON channel program |
 | `GAS_STATION_QUOTE_TTL_MS` | raises the merged quote/blockhash deadline |
+| `GAS_STATION_MAX_LAMPORTS_CEILING` | per-job ceiling override in lamports (default 20,000,000); clamps the no-draft allowance too |
 | `EVM_GAS_STATION_CONFIG_JSON` | enables kind:5098 — a JSON array of chains |
 | `EVM_GAS_STATION_QUOTE_TTL_MS` / `EVM_GAS_STATION_MAX_GAS` | override 120s / 300,000 |
 

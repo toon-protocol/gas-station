@@ -23,8 +23,46 @@
 
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { verifyEvent } from 'nostr-tools/pure';
 import type { NostrEvent } from 'nostr-tools/pure';
+
+/**
+ * The three doors the connector can terminate a route at.
+ *
+ * `/gas` takes any phase. `/gas/quote` and `/gas/execute` take only the phase
+ * they are named for, and refuse the other as F00 — a transport reject: no
+ * handler runs and no gas moves. Whether the packet is still charged is the
+ * connector's rule, not this app's (on rust-sha-deded9f it is: a reject is an
+ * answer, connector#1028), and it is charged at THAT door's price — so an
+ * execute pushed through the cheap quote door pays the quote price and gets
+ * nothing, never an execute at a discount.
+ *
+ * WHY THREE DOORS: the connector prices per ROUTE, and a route is a
+ * `handler_url`. A quote costs this node nothing; an execute costs it real
+ * native token, up to the per-job ceiling. Behind one door they are one price,
+ * so either a free quote costs the caller what an execute does or an execute
+ * is priced like a free quote (a faucet). Two doors let the operator terminate
+ * `g.example.gas.quote` at `/gas/quote` for next to nothing and
+ * `g.example.gas` at `/gas/execute` for what a job can cost the float — the
+ * connector refuses one handler_url at two prices, and these are two.
+ * Learned on the first mainnet deployment (Drew's node, 2026-09-03).
+ */
+export const HANDLER_PATHS = {
+  any: '/gas',
+  quote: '/gas/quote',
+  execute: '/gas/execute',
+} as const;
+
+export type JobPhase = 'quote' | 'execute';
+
+/** The `['param','phase',…]` tag, or undefined when the event carries none. */
+export function phaseOf(event: NostrEvent): string | undefined {
+  for (const tag of event.tags) {
+    if (tag[0] === 'param' && tag[1] === 'phase') return tag[2];
+  }
+  return undefined;
+}
 
 /**
  * Structural mirror of the SDK's `HandlerContext` / `HandlerResponse`.
@@ -83,8 +121,10 @@ function safeBigInt(s: string): bigint {
 /**
  * Start the job backend on `handlerPort`.
  *
- *   GET  /health   liveness on the job port (the richer health is on BLS_PORT)
- *   POST /gas      `{ event }` (a signed kind:5096 / kind:5098) -> `{ accept, result }`
+ *   GET  /health        liveness on the job port (the richer health is on BLS_PORT)
+ *   POST /gas           `{ event }` (a signed kind:5096 / kind:5098), any phase
+ *   POST /gas/quote     the same, quote phase only   (see {@link HANDLER_PATHS})
+ *   POST /gas/execute   the same, execute phase only
  */
 export function startGasStationBackend(
   config: GasStationBackendConfig
@@ -93,7 +133,7 @@ export function startGasStationBackend(
 
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
-  app.post('/gas', async (c) => {
+  const door = (only?: JobPhase) => async (c: Context) => {
     // A non-object body (`null`, a bare `5`) is still valid JSON, so the parse
     // does not throw — guard the shape before dereferencing `.event`, or
     // `null.event` escapes as a framework-level 500.
@@ -109,6 +149,30 @@ export function startGasStationBackend(
     const event = (body as { event?: NostrEvent }).event;
     if (!event) {
       return c.json({ accept: false, code: 'F00', message: 'Missing required field: event' }, 422);
+    }
+
+    // A phase-scoped door admits only its own phase. F00 (not an in-band
+    // refusal) on purpose: nothing ran, so there is no job to report on, and
+    // an execute sent through the cheaper quote door is exactly the packet
+    // this split exists to refuse. Whether the connector charges for the
+    // refused packet is its rule (see HANDLER_PATHS); this app never sees a
+    // claim either way.
+    if (only !== undefined) {
+      const phase = phaseOf(event);
+      if (phase !== only) {
+        return c.json(
+          {
+            accept: false,
+            code: 'F00',
+            message:
+              `This door (${HANDLER_PATHS[only]}) serves phase "${only}" only; ` +
+              `the event's phase is ${phase === undefined ? 'missing' : JSON.stringify(phase)}. ` +
+              `Send it to the route terminated at ${HANDLER_PATHS.any} or at ` +
+              `${phase === 'quote' || phase === 'execute' ? HANDLER_PATHS[phase] : 'the door for its phase'}.`,
+          },
+          422
+        );
+      }
     }
 
     // Trusted payment headers, captured for the log line. NOT validated here —
@@ -208,7 +272,11 @@ export function startGasStationBackend(
       { accept: false, code: res.code, message: res.message },
       res.code === 'F00' ? 422 : 502
     );
-  });
+  };
+
+  app.post(HANDLER_PATHS.any, door());
+  app.post(HANDLER_PATHS.quote, door('quote'));
+  app.post(HANDLER_PATHS.execute, door('execute'));
 
   return serve({ fetch: app.fetch, port: config.handlerPort }) as unknown as GasStationBackend;
 }
