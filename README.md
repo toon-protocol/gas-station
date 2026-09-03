@@ -266,9 +266,12 @@ So the app serves three doors, advertised under `transport.handlerPaths`:
 | `/gas/execute` | `phase=execute` only | a route priced at what the ceiling buys |
 | `/gas` | either | one price for both — the original shape, still supported |
 
-A phase-scoped door refuses the other phase as **F00**, a transport reject the
-connector rolls back, so a client that sends an execute through the quote
-route pays nothing and gets nothing. The operator terminates two routes:
+A phase-scoped door refuses the other phase as **F00**, a transport reject:
+no handler runs and no gas moves. Whether the connector still charges for the
+refused packet is its rule, not this app's (the current build does: a reject
+is an answer, connector#1028), and it charges the price of the door that
+refused, so an execute pushed through the quote route pays the quote price and
+gets nothing. The operator terminates two routes:
 
 ```toml
 [[routes]]

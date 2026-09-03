@@ -31,8 +31,12 @@ import type { NostrEvent } from 'nostr-tools/pure';
  * The three doors the connector can terminate a route at.
  *
  * `/gas` takes any phase. `/gas/quote` and `/gas/execute` take only the phase
- * they are named for, and refuse the other as F00 — a transport reject, so a
- * client that sends an execute through the quote door is not charged for it.
+ * they are named for, and refuse the other as F00 — a transport reject: no
+ * handler runs and no gas moves. Whether the packet is still charged is the
+ * connector's rule, not this app's (on rust-sha-deded9f it is: a reject is an
+ * answer, connector#1028), and it is charged at THAT door's price — so an
+ * execute pushed through the cheap quote door pays the quote price and gets
+ * nothing, never an execute at a discount.
  *
  * WHY THREE DOORS: the connector prices per ROUTE, and a route is a
  * `handler_url`. A quote costs this node nothing; an execute costs it real
@@ -148,10 +152,11 @@ export function startGasStationBackend(
     }
 
     // A phase-scoped door admits only its own phase. F00 (not an in-band
-    // refusal) on purpose: the connector rolls the claim back on a transport
-    // reject, so the caller pays nothing for knocking on the wrong door —
-    // and an execute sent through the cheaper quote door is exactly the
-    // packet this split exists to refuse.
+    // refusal) on purpose: nothing ran, so there is no job to report on, and
+    // an execute sent through the cheaper quote door is exactly the packet
+    // this split exists to refuse. Whether the connector charges for the
+    // refused packet is its rule (see HANDLER_PATHS); this app never sees a
+    // claim either way.
     if (only !== undefined) {
       const phase = phaseOf(event);
       if (phase !== only) {

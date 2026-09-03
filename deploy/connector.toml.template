@@ -102,7 +102,8 @@ key_file = "/app/data/signer.key"
 # the float; raise the price if a job costs you more than it earns.
 #
 # This devnet box settles in play money, so both doors stay at 1000 here. The
-# split is still real: an execute through `g.toon.gas.quote` is refused F00.
+# split is still real: an execute through `g.toon.gas.quote` is refused F00
+# (charged at the quote price, if the connector charges rejects; never run).
 [[routes]]
 prefix      = "g.toon.gas.quote"
 handler_url = "http://gas-station:3300/gas/quote"
