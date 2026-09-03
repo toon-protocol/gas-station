@@ -22,15 +22,23 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   HANDLER_PATHS,
   startGasStationBackend,
+  tierPath,
   type GasStationHandler,
+  type GasStationTier,
 } from './gas-station-backend.js';
 
 /** Start the backend, run against its ephemeral port, then close it. */
 async function withBackend(
   handlers: Record<number, GasStationHandler>,
-  run: (url: string) => Promise<void>
+  run: (url: string) => Promise<void>,
+  tiers?: GasStationTier[]
 ): Promise<void> {
-  const backend = startGasStationBackend({ handlers, handlerPort: 0, devMode: true });
+  const backend = startGasStationBackend({
+    handlers,
+    handlerPort: 0,
+    devMode: true,
+    ...(tiers ? { tiers } : {}),
+  });
   const address = (backend as unknown as { address(): { port: number } }).address();
   const url = `http://127.0.0.1:${address.port}${HANDLER_PATHS.any}`;
   try {
@@ -265,6 +273,93 @@ describe('the phase-scoped doors', () => {
       expect(res.status).toBe(200);
       expect(((await res.json()) as { accept: boolean }).accept).toBe(true);
       expect(handler).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+// ── Tier doors ──────────────────────────────────────────────────────────────
+// A route per job shape: each tier is its own execute door with its own
+// ceiling, so the connector can sell `…gas.transfer` cheaper than `…gas.ant`
+// and the cheap door still cannot execute the expensive job.
+
+const TIERS: GasStationTier[] = [
+  { name: 'transfer', maxLamports: 100_000n },
+  { name: 'ant', maxLamports: 16_500_000n },
+];
+
+describe('the tier doors', () => {
+  it('names a tier door under the execute door', () => {
+    expect(tierPath('ant')).toBe('/gas/execute/ant');
+  });
+
+  it('hands the handler the tier it arrived through', async () => {
+    const handler: GasStationHandler = vi.fn(async (ctx) =>
+      ctx.accept({ tier: ctx.tier?.name, cap: ctx.tier?.maxLamports.toString() })
+    );
+    await withBackend({ 5096: handler }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, tierPath('ant')), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5096, 'execute') }),
+      });
+      expect(res.status).toBe(200);
+      expect(handler).toHaveBeenCalledTimes(1);
+      const ctx = (handler as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { tier?: GasStationTier };
+      expect(ctx.tier).toEqual({ name: 'ant', maxLamports: 16_500_000n });
+    }, TIERS);
+  });
+
+  it('leaves ctx.tier unset on the untiered doors', async () => {
+    const handler: GasStationHandler = vi.fn(async (ctx) => ctx.accept());
+    await withBackend({ 5096: handler }, async (url) => {
+      for (const path of [HANDLER_PATHS.any, HANDLER_PATHS.execute]) {
+        await fetch(url.replace(HANDLER_PATHS.any, path), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ event: phased(5096, 'execute') }),
+        });
+      }
+      for (const call of (handler as ReturnType<typeof vi.fn>).mock.calls) {
+        expect((call[0] as { tier?: unknown }).tier).toBeUndefined();
+      }
+    }, TIERS);
+  });
+
+  it('is an execute door: refuses a quote as F00', async () => {
+    const handler = neverCalled();
+    await withBackend({ 5096: handler }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, tierPath('transfer')), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5096, 'quote') }),
+      });
+      expect(res.status).toBe(422);
+      expect(handler).not.toHaveBeenCalled();
+    }, TIERS);
+  });
+
+  it('serves kind:5096 only — a lamport ceiling means nothing to an EVM relay', async () => {
+    const handler = neverCalled();
+    await withBackend({ 5098: handler }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, tierPath('transfer')), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5098, 'execute') }),
+      });
+      expect(res.status).toBe(422);
+      expect(((await res.json()) as { message: string }).message).toContain('kind:5096 only');
+      expect(handler).not.toHaveBeenCalled();
+    }, TIERS);
+  });
+
+  it('opens no tier door when none is configured', async () => {
+    await withBackend({ 5096: neverCalled() }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, tierPath('ant')), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5096, 'execute') }),
+      });
+      expect(res.status).toBe(404);
     });
   });
 });

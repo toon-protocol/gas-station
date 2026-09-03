@@ -261,8 +261,10 @@ nearly empty — so underpricing drains the float and starts answering
 
 Price the two phases apart: terminate a `…gas.quote` route at `/gas/quote`
 for next to nothing and the execute route at `/gas/execute` for what
-`GAS_STATION_MAX_LAMPORTS_CEILING` buys. See the top-level README,
-"Pricing the two phases apart".
+`GAS_STATION_MAX_LAMPORTS_CEILING` buys. Then a route per job shape:
+`GAS_STATION_TIERS_JSON` opens `/gas/execute/<tier>` doors with their own
+ceilings, one route each. See the top-level README, "Pricing the two phases
+apart" and "A route per job shape: tiers".
 
 ## Privacy invariant
 
