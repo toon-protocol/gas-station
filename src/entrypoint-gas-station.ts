@@ -44,6 +44,13 @@
  *                           slow client ceremony. Keep it under Solana's
  *                           blockhash validity or execute answers
  *                           `blockhash_expired`.
+ *   GAS_STATION_MAX_LAMPORTS_CEILING  Overrides the per-job ceiling (default
+ *                           20,000,000 lamports = 0.02 SOL): a quote above it
+ *                           is refused `quote_refused`. Set it to what the
+ *                           execute route's price buys, so a job can never
+ *                           cost the float more than the caller paid for it.
+ *                           A no-draft quote's default allowance is clamped
+ *                           to it when it is lower.
  *
  *   ── kind:5098, EVM ──
  *   EVM_GAS_STATION_CONFIG_JSON  JSON array of chain configs
@@ -73,6 +80,7 @@ import { Hono } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
 import { getAddress, isAddress } from 'ethers';
 import {
+  HANDLER_PATHS,
   startGasStationBackend,
   type GasStationBackend,
   type GasStationHandler,
@@ -83,6 +91,7 @@ import {
   type SolanaNetwork,
 } from './job-params.js';
 import {
+  DEFAULT_POLICY,
   GAS_STATION_KIND,
   GAS_STATION_REQUEST_SPEC,
   createGasStationHandler,
@@ -241,6 +250,14 @@ export interface GasStationDescribeResponse {
     resultDelivery: 'ilp-fulfill-body';
     /** A refusal is an accepted job with `status:"failed"` and a `reason`. */
     refusals: 'in-band';
+    /**
+     * The paths a connector route can terminate at. `any` takes both phases;
+     * `quote` and `execute` take only theirs, so an operator can price the
+     * two phases apart (a quote costs this node nothing, an execute costs it
+     * real gas). Which ILP prefix lands on which door is the connector's
+     * `GET /ilp` to answer.
+     */
+    handlerPaths: { any: string; quote: string; execute: string };
   };
   /** The registered kinds, bare. Kept for callers that only want the numbers. */
   handlerKinds: number[];
@@ -320,6 +337,8 @@ export interface GasStationEnvConfig {
   rpcUrl?: string;
   channelProgramId?: string;
   quoteTtlMs?: number;
+  /** Per-job ceiling override in lamports (see GAS_STATION_MAX_LAMPORTS_CEILING). */
+  maxLamportsCeiling?: bigint;
 }
 
 /**
@@ -380,12 +399,25 @@ export function resolveGasStationEnv(
     }
   }
 
+  const ceilingRaw = env['GAS_STATION_MAX_LAMPORTS_CEILING']?.trim();
+  let maxLamportsCeiling: bigint | undefined;
+  if (ceilingRaw) {
+    if (!/^[0-9]+$/.test(ceilingRaw) || BigInt(ceilingRaw) <= 0n) {
+      throw new Error(
+        'GAS_STATION_MAX_LAMPORTS_CEILING must be a positive integer number of lamports, ' +
+          `got ${JSON.stringify(ceilingRaw)}`
+      );
+    }
+    maxLamportsCeiling = BigInt(ceilingRaw);
+  }
+
   return {
     network: networkRaw,
     solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')),
     ...(rpcUrl ? { rpcUrl } : {}),
     ...(channelProgramId ? { channelProgramId } : {}),
     ...(quoteTtlMs !== undefined ? { quoteTtlMs } : {}),
+    ...(maxLamportsCeiling !== undefined ? { maxLamportsCeiling } : {}),
   };
 }
 
@@ -534,11 +566,25 @@ export function buildHandlers(
         ...(solana.rpcUrl ? { rpcUrl: solana.rpcUrl } : {}),
         ...(solana.channelProgramId ? { channelProgramId: solana.channelProgramId } : {}),
         ...(solana.quoteTtlMs !== undefined ? { quoteTtlMs: solana.quoteTtlMs } : {}),
+        // A lowered ceiling also clamps the no-draft allowance: a quote the
+        // node would then refuse to execute is not a quote worth handing out.
+        ...(solana.maxLamportsCeiling !== undefined
+          ? {
+              policy: {
+                maxLamportsCeiling: solana.maxLamportsCeiling,
+                defaultMaxLamports:
+                  solana.maxLamportsCeiling < DEFAULT_POLICY.defaultMaxLamports
+                    ? solana.maxLamportsCeiling
+                    : DEFAULT_POLICY.defaultMaxLamports,
+              },
+            }
+          : {}),
       })
     );
     describe.push(
       `kind:${GAS_STATION_KIND} Solana (network: ${solana.network}` +
-        `${solana.channelProgramId ? `, channel program: ${solana.channelProgramId}` : ''})`
+        `${solana.channelProgramId ? `, channel program: ${solana.channelProgramId}` : ''}` +
+        `, per-job ceiling: ${solana.maxLamportsCeiling ?? DEFAULT_POLICY.maxLamportsCeiling} lamports)`
     );
     jobs.push({
       kind: GAS_STATION_KIND,
@@ -656,6 +702,7 @@ async function main(): Promise<void> {
         inputEncoding: 'param-tags',
         resultDelivery: 'ilp-fulfill-body',
         refusals: 'in-band',
+        handlerPaths: { ...HANDLER_PATHS },
       },
       handlerKinds,
       jobs,
@@ -672,7 +719,7 @@ async function main(): Promise<void> {
 ║                    gas-station ready                      ║
 ╠═══════════════════════════════════════════════════════════╣
 ║ Pubkey:        ${safePubkey.slice(0, 32)}... ║
-║ Handler port:  ${config.handlerPort} (POST /gas)                          ║
+║ Handler port:  ${config.handlerPort} (POST /gas, /gas/quote, /gas/execute) ║
 ║ Health port:   ${config.blsPort} (GET /health)                        ║
 ║ Handler kinds: ${handlerKinds.join(', ')}                                ║
 ╚═══════════════════════════════════════════════════════════╝

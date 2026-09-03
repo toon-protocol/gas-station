@@ -20,6 +20,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  HANDLER_PATHS,
   startGasStationBackend,
   type GasStationHandler,
 } from './gas-station-backend.js';
@@ -31,7 +32,7 @@ async function withBackend(
 ): Promise<void> {
   const backend = startGasStationBackend({ handlers, handlerPort: 0, devMode: true });
   const address = (backend as unknown as { address(): { port: number } }).address();
-  const url = `http://127.0.0.1:${address.port}/gas`;
+  const url = `http://127.0.0.1:${address.port}${HANDLER_PATHS.any}`;
   try {
     await run(url);
   } finally {
@@ -188,5 +189,82 @@ describe('POST /gas dispatch', () => {
       });
     });
     expect(seen).toBe(4200n);
+  });
+});
+
+// ── The phase-scoped doors ──────────────────────────────────────────────────
+// A quote costs this node nothing and an execute costs it real gas, but the
+// connector prices per handler_url. `/gas/quote` and `/gas/execute` exist so
+// an operator can terminate two routes at two prices; each must refuse the
+// other phase as F00 (a transport reject, so the caller is not charged), or
+// the cheaper door is a discount on executes.
+
+/** The same event with a `['param','phase',…]` tag. */
+function phased(kind: number, phase?: string): Record<string, unknown> {
+  const e = event(kind);
+  if (phase !== undefined) e['tags'] = [['param', 'phase', phase]];
+  return e;
+}
+
+const okHandler = (): GasStationHandler =>
+  vi.fn(async (ctx) => ctx.accept({ phase: 'seen' }));
+
+describe('the phase-scoped doors', () => {
+  it('names all three doors so /describe can advertise them', () => {
+    expect(HANDLER_PATHS).toEqual({ any: '/gas', quote: '/gas/quote', execute: '/gas/execute' });
+  });
+
+  it.each([
+    ['quote', 'execute'],
+    ['execute', 'quote'],
+  ] as const)('the %s door refuses a %s as F00 without running the handler', async (door, phase) => {
+    const handler = neverCalled();
+    await withBackend({ 5096: handler }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, HANDLER_PATHS[door]), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5096, phase) }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { accept: boolean; code: string; message: string };
+      expect(body.accept).toBe(false);
+      expect(body.code).toBe('F00');
+      expect(body.message).toContain(`phase "${door}" only`);
+      expect(body.message).toContain(HANDLER_PATHS[phase]);
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a phase-scoped door refuses an event with no phase tag at all', async () => {
+    const handler = neverCalled();
+    await withBackend({ 5096: handler }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, HANDLER_PATHS.quote), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5096) }),
+      });
+      expect(res.status).toBe(422);
+      expect(((await res.json()) as { message: string }).message).toContain('missing');
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    ['quote', HANDLER_PATHS.quote],
+    ['execute', HANDLER_PATHS.execute],
+    ['quote', HANDLER_PATHS.any],
+    ['execute', HANDLER_PATHS.any],
+  ] as const)('admits a %s through %s', async (phase, path) => {
+    const handler = okHandler();
+    await withBackend({ 5096: handler }, async (url) => {
+      const res = await fetch(url.replace(HANDLER_PATHS.any, path), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: phased(5096, phase) }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { accept: boolean }).accept).toBe(true);
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -253,6 +253,30 @@ describe('resolveGasStationEnv', () => {
     });
   });
 
+  describe('GAS_STATION_MAX_LAMPORTS_CEILING', () => {
+    it('is undefined when absent (the policy default applies)', () => {
+      const config = resolveGasStationEnv({ GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY });
+      expect(config?.maxLamportsCeiling).toBeUndefined();
+    });
+
+    it('surfaces a positive integer of lamports as a bigint', () => {
+      const config = resolveGasStationEnv({
+        GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY,
+        GAS_STATION_MAX_LAMPORTS_CEILING: ' 16500000 ',
+      });
+      expect(config?.maxLamportsCeiling).toBe(16_500_000n);
+    });
+
+    it.each([['0'], ['-1'], ['0.02'], ['20e6'], ['lots']])('refuses %s', (value) => {
+      expect(() =>
+        resolveGasStationEnv({
+          GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY,
+          GAS_STATION_MAX_LAMPORTS_CEILING: value,
+        })
+      ).toThrow(/GAS_STATION_MAX_LAMPORTS_CEILING/);
+    });
+  });
+
   describe('GAS_STATION_QUOTE_TTL_MS', () => {
     it('is surfaced when set', () => {
       const config = resolveGasStationEnv({

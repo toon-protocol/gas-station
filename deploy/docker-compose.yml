@@ -80,6 +80,7 @@ services:
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-}
       GAS_STATION_CHANNEL_PROGRAM_ID: ${GAS_STATION_CHANNEL_PROGRAM_ID:-}
       GAS_STATION_QUOTE_TTL_MS: ${GAS_STATION_QUOTE_TTL_MS:-}
+      GAS_STATION_MAX_LAMPORTS_CEILING: ${GAS_STATION_MAX_LAMPORTS_CEILING:-}
       # kind:5098 — EVM. A JSON array of {chainId, rpcUrl, forwarderAddress,
       # tokenNetworkAddress, relayerPrivateKey}, one dedicated relayer wallet
       # per chain. Adding a chain is an entry here, not a code change.

@@ -79,8 +79,18 @@ key_file = "/app/data/signer.key"
 # A store upload costs the operator credits it bought in bulk; a gas job costs
 # the operator native token at whatever the chain charges that second.
 #
-# The flat price below is charged per JOB, and the quote phase is a job too.
-# Two things keep that honest rather than a way to drain the float:
+# A price is charged per JOB, and the connector prices per handler_url. The
+# app serves three doors so the two phases can be priced apart:
+#
+#     /gas/quote     quote only    costs this node nothing
+#     /gas/execute   execute only  costs this node real gas, up to the ceiling
+#     /gas           either        one price for both (the original shape)
+#
+# On a MAINNET station price the execute route at what the per-job ceiling
+# buys (`GAS_STATION_MAX_LAMPORTS_CEILING` × the native token's price, in the
+# settlement token's smallest unit) and the quote route at next to nothing;
+# then no job can cost the float more than its caller paid. Two things still
+# hold either way:
 #
 #   * the per-job ceilings in the app (`maxLamportsCeiling`, `maxGas`) bound
 #     what any single execute can cost this node, and
@@ -90,9 +100,17 @@ key_file = "/app/data/signer.key"
 # So the failure mode of underpricing is "the float drains and the node starts
 # answering `float_exhausted`", not "the node signs something ruinous". Watch
 # the float; raise the price if a job costs you more than it earns.
+#
+# This devnet box settles in play money, so both doors stay at 1000 here. The
+# split is still real: an execute through `g.toon.gas.quote` is refused F00.
+[[routes]]
+prefix      = "g.toon.gas.quote"
+handler_url = "http://gas-station:3300/gas/quote"
+price       = 1000
+
 [[routes]]
 prefix      = "g.toon.gas"
-handler_url = "http://gas-station:3300/gas"
+handler_url = "http://gas-station:3300/gas/execute"
 price       = 1000
 
 # The same app under the relay's name for it. The relay forwards
@@ -101,10 +119,11 @@ price       = 1000
 # need a route of their own. Priced identically to `g.toon.gas` because the
 # two share a `handler_url`, and the connector refuses a config where one
 # handler is reachable at two prices (the cheaper door would take every
-# packet).
+# packet). The relay forwards to the execute door; a cheap quote through the
+# relay would be a second forward, not this row.
 [[routes]]
 prefix      = "g.toon.relay.gas"
-handler_url = "http://gas-station:3300/gas"
+handler_url = "http://gas-station:3300/gas/execute"
 price       = 1000
 
 
@@ -197,7 +216,7 @@ write_keys_file   = "/app/data/operator-write.keys"
 # `addresses` lists every prefix terminated above: a route this node
 # terminates but does not advertise is one no client can discover.
 [node]
-addresses     = ["g.toon.gas", "g.toon.relay.gas"]
+addresses     = ["g.toon.gas", "g.toon.gas.quote", "g.toon.relay.gas"]
 http_endpoint = "https://proxy.gas.${DOMAIN}/ilp"
 btp_endpoint  = "wss://proxy.gas.${DOMAIN}/ilp/btp"
 

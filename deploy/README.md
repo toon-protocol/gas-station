@@ -259,6 +259,11 @@ execute can cost, and the float checks stop it quoting once the wallet is
 nearly empty — so underpricing drains the float and starts answering
 `float_exhausted`, rather than signing something ruinous. Watch the float.
 
+Price the two phases apart: terminate a `…gas.quote` route at `/gas/quote`
+for next to nothing and the execute route at `/gas/execute` for what
+`GAS_STATION_MAX_LAMPORTS_CEILING` buys. See the top-level README,
+"Pricing the two phases apart".
+
 ## Privacy invariant
 
 The job backend is **payment-oblivious**: by the time a request reaches
