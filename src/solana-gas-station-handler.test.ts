@@ -483,7 +483,11 @@ function makeStubDeps(opts: StubOptions = {}) {
 }
 
 function makeHandler(
-  opts: StubOptions & { now?: () => number; channelProgramId?: string } = {}
+  opts: StubOptions & {
+    now?: () => number;
+    channelProgramId?: string;
+    tiers?: { name: string; maxLamports: bigint }[];
+  } = {}
 ) {
   const stub = makeStubDeps(opts);
   const handler = createGasStationHandler({
@@ -493,6 +497,7 @@ function makeHandler(
     now: opts.now,
     confirm: { timeoutMs: 200, intervalMs: 10 },
     ...(opts.channelProgramId ? { channelProgramId: opts.channelProgramId } : {}),
+    ...(opts.tiers ? { tiers: opts.tiers } : {}),
   });
   return { handler, ...stub };
 }
@@ -895,5 +900,73 @@ describe('assertSolanaKeypair', () => {
       /not a valid Ed25519 keypair/
     );
     await expect(assertSolanaKeypair(notAKeypair)).rejects.toThrow(/openssl rand -hex 64/);
+  });
+});
+
+// ── Tiers: a route per job shape ────────────────────────────────────────────
+// The quote names the cheapest tier whose ceiling covers what simulation said
+// the job costs; an execute through a door whose ceiling is under the quote
+// is refused, so the cheap route cannot carry the expensive job.
+
+describe('tiers', () => {
+  const TIERS = [
+    { name: 'ant', maxLamports: 16_500_000n },
+    { name: 'transfer', maxLamports: 2_000_000n },
+  ];
+
+  it('the quote names the cheapest tier that covers the cap', async () => {
+    const { handler } = makeHandler({ tiers: TIERS });
+    const quote = decodeReceipt<GasStationQuoteReceipt>(
+      await handler(ctxFor(jobEvent({ phase: 'quote' })))
+    );
+    // No draft ⇒ the default 1,000,000 allowance, which 'transfer' covers.
+    expect(quote.status).toBe('ok');
+    expect(quote.tier).toBe('transfer');
+  });
+
+  it('the quote answers tier: null when no tier covers the cap', async () => {
+    const { handler } = makeHandler({ tiers: [{ name: 'tiny', maxLamports: 10n }] });
+    const quote = decodeReceipt<GasStationQuoteReceipt>(
+      await handler(ctxFor(jobEvent({ phase: 'quote' })))
+    );
+    expect(quote.tier).toBeNull();
+  });
+
+  it('a quote carries no tier field when the deployment has none', async () => {
+    const { handler } = makeHandler();
+    const quote = decodeReceipt<GasStationQuoteReceipt>(
+      await handler(ctxFor(jobEvent({ phase: 'quote' })))
+    );
+    expect('tier' in quote).toBe(false);
+  });
+
+  it('execute through a door whose ceiling is under the quote is refused tier_exceeded', async () => {
+    const { handler, sent } = makeHandler({ tiers: TIERS });
+    const { quote, wire } = await quoteThenTx(handler);
+    const res = await handler({
+      ...ctxFor(
+        jobEvent({ phase: 'execute', transaction: wire, quoteId: quote.quoteId, idempotencyKey: 'tier-1' })
+      ),
+      tier: { name: 'tiny', maxLamports: 10n },
+    });
+    const receipt = decodeReceipt<{ status: string; reason?: string; detail?: string }>(res);
+    expect(receipt.status).toBe('failed');
+    expect(receipt.reason).toBe('tier_exceeded');
+    expect(receipt.detail).toContain('transfer');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('execute through a door whose ceiling covers the quote proceeds', async () => {
+    const { handler, sent } = makeHandler({ tiers: TIERS });
+    const { quote, wire } = await quoteThenTx(handler);
+    const res = await handler({
+      ...ctxFor(
+        jobEvent({ phase: 'execute', transaction: wire, quoteId: quote.quoteId, idempotencyKey: 'tier-2' })
+      ),
+      tier: { name: 'transfer', maxLamports: 2_000_000n },
+    });
+    const receipt = decodeReceipt<GasStationExecuteReceipt>(res);
+    expect(receipt.status).toBe('ok');
+    expect(sent).toHaveLength(1);
   });
 });

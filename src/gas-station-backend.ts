@@ -56,6 +56,27 @@ export const HANDLER_PATHS = {
 
 export type JobPhase = 'quote' | 'execute';
 
+/**
+ * An execute door with its own per-job ceiling: `POST /gas/execute/<name>`.
+ *
+ * WHY: the connector prices per route and a gas job's cost is set by the
+ * transaction's shape (a fee-only transfer ≈ 10k lamports, an ANT spawn
+ * ≈ 16M), so "a route per job" is how the operator sells each shape at its
+ * own price. The door is what keeps the cheap route cheap: an execute whose
+ * quote exceeds the door's `maxLamports` is refused `tier_exceeded`, so a
+ * 16M-lamport spawn cannot ride the transfer route. The quote receipt names
+ * the smallest tier that fits, so a client knows which route to pay.
+ */
+export interface GasStationTier {
+  /** Path segment and the name a quote receipt answers under. */
+  name: string;
+  /** The most a job through this door may cost the fee payer. */
+  maxLamports: bigint;
+}
+
+/** The handler path for a tier: `/gas/execute/<name>`. */
+export const tierPath = (name: string): string => `${HANDLER_PATHS.execute}/${name}`;
+
 /** The `['param','phase',…]` tag, or undefined when the event carries none. */
 export function phaseOf(event: NostrEvent): string | undefined {
   for (const tag of event.tags) {
@@ -77,6 +98,8 @@ export interface GasStationHandlerContext {
   readonly pubkey: string;
   readonly amount: bigint;
   readonly destination: string;
+  /** Set when the job arrived through a tier door — see {@link GasStationTier}. */
+  readonly tier?: GasStationTier;
   decode(): NostrEvent;
   accept(metadata?: Record<string, unknown>): {
     accept: true;
@@ -104,6 +127,8 @@ export interface GasStationBackendConfig {
   handlerPort: number;
   /** Skip Schnorr signature verification (smoke tests only). */
   devMode: boolean;
+  /** Execute doors with their own ceilings — one `POST /gas/execute/<name>` each. */
+  tiers?: GasStationTier[];
 }
 
 export interface GasStationBackend {
@@ -125,6 +150,7 @@ function safeBigInt(s: string): bigint {
  *   POST /gas           `{ event }` (a signed kind:5096 / kind:5098), any phase
  *   POST /gas/quote     the same, quote phase only   (see {@link HANDLER_PATHS})
  *   POST /gas/execute   the same, execute phase only
+ *   POST /gas/execute/<tier>   execute only, kind:5096 only, under that tier's ceiling
  */
 export function startGasStationBackend(
   config: GasStationBackendConfig
@@ -133,7 +159,7 @@ export function startGasStationBackend(
 
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
-  const door = (only?: JobPhase) => async (c: Context) => {
+  const door = (only?: JobPhase, tier?: GasStationTier) => async (c: Context) => {
     // A non-object body (`null`, a bare `5`) is still valid JSON, so the parse
     // does not throw — guard the shape before dereferencing `.event`, or
     // `null.event` escapes as a framework-level 500.
@@ -175,6 +201,18 @@ export function startGasStationBackend(
       }
     }
 
+    // A tier is a Solana ceiling in lamports; it means nothing to kind:5098.
+    if (tier !== undefined && event.kind !== 5096) {
+      return c.json(
+        {
+          accept: false,
+          code: 'F00',
+          message: `Tier door ${tierPath(tier.name)} serves kind:5096 only; got kind:${event.kind}.`,
+        },
+        422
+      );
+    }
+
     // Trusted payment headers, captured for the log line. NOT validated here —
     // the connector already did, and re-deriving them would be a second source
     // of truth for a fact this process is not the authority on.
@@ -212,6 +250,7 @@ export function startGasStationBackend(
       pubkey: event.pubkey,
       amount: amount ? safeBigInt(amount) : 0n,
       destination: 'g.toon.gas',
+      ...(tier ? { tier } : {}),
       decode: () => event,
       accept: (metadata) => ({ accept: true, ...(metadata ? { metadata } : {}) }),
       reject: (code, message) => ({ accept: false, code, message }),
@@ -277,6 +316,9 @@ export function startGasStationBackend(
   app.post(HANDLER_PATHS.any, door());
   app.post(HANDLER_PATHS.quote, door('quote'));
   app.post(HANDLER_PATHS.execute, door('execute'));
+  for (const tier of config.tiers ?? []) {
+    app.post(tierPath(tier.name), door('execute', tier));
+  }
 
   return serve({ fetch: app.fetch, port: config.handlerPort }) as unknown as GasStationBackend;
 }

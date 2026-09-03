@@ -277,6 +277,47 @@ describe('resolveGasStationEnv', () => {
     });
   });
 
+  describe('GAS_STATION_TIERS_JSON', () => {
+    const withTiers = (value: string, extra: Record<string, string> = {}) =>
+      resolveGasStationEnv({ GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY, GAS_STATION_TIERS_JSON: value, ...extra });
+
+    it('is undefined when absent', () => {
+      expect(resolveGasStationEnv({ GAS_STATION_SOLANA_SECRET_KEY: SOLANA_KEY })?.tiers).toBeUndefined();
+    });
+
+    it('parses tiers and returns them ascending by ceiling', () => {
+      const tiers = withTiers(
+        '[{"name":"ant","maxLamports":"16500000"},{"name":"transfer","maxLamports":100000}]'
+      )?.tiers;
+      expect(tiers).toEqual([
+        { name: 'transfer', maxLamports: 100_000n },
+        { name: 'ant', maxLamports: 16_500_000n },
+      ]);
+    });
+
+    it.each([
+      ['not JSON', '[{'],
+      ['not an array', '{"name":"a","maxLamports":1}'],
+      ['an empty array', '[]'],
+      ['a name that is not a path segment', '[{"name":"Ant Spawn","maxLamports":1}]'],
+      ['a duplicate name', '[{"name":"a","maxLamports":1},{"name":"a","maxLamports":2}]'],
+      ['a zero ceiling', '[{"name":"a","maxLamports":0}]'],
+      ['a fractional ceiling', '[{"name":"a","maxLamports":0.5}]'],
+      ['a ceiling above the per-job ceiling', '[{"name":"a","maxLamports":20000001}]'],
+    ])('refuses %s', (_label, value) => {
+      expect(() => withTiers(value)).toThrow(/GAS_STATION_TIERS_JSON/);
+    });
+
+    it('measures the ceiling bound against GAS_STATION_MAX_LAMPORTS_CEILING when set', () => {
+      expect(() =>
+        withTiers('[{"name":"a","maxLamports":5000001}]', { GAS_STATION_MAX_LAMPORTS_CEILING: '5000000' })
+      ).toThrow(/above the per-job ceiling 5000000/);
+      expect(
+        withTiers('[{"name":"a","maxLamports":5000000}]', { GAS_STATION_MAX_LAMPORTS_CEILING: '5000000' })?.tiers
+      ).toEqual([{ name: 'a', maxLamports: 5_000_000n }]);
+    });
+  });
+
   describe('GAS_STATION_QUOTE_TTL_MS', () => {
     it('is surfaced when set', () => {
       const config = resolveGasStationEnv({

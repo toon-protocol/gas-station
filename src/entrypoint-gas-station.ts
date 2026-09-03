@@ -51,6 +51,14 @@
  *                           cost the float more than the caller paid for it.
  *                           A no-draft quote's default allowance is clamped
  *                           to it when it is lower.
+ *   GAS_STATION_TIERS_JSON  Execute doors with their own ceilings, so the
+ *                           connector in front can sell a route per job
+ *                           shape: `[{"name":"transfer","maxLamports":100000},
+ *                           {"name":"ant","maxLamports":16500000}]` opens
+ *                           POST /gas/execute/transfer and /gas/execute/ant.
+ *                           Names are [a-z0-9-], unique; ceilings positive
+ *                           and not above the per-job ceiling. The quote
+ *                           receipt names the cheapest tier that fits.
  *
  *   ── kind:5098, EVM ──
  *   EVM_GAS_STATION_CONFIG_JSON  JSON array of chain configs
@@ -82,8 +90,10 @@ import { getAddress, isAddress } from 'ethers';
 import {
   HANDLER_PATHS,
   startGasStationBackend,
+  tierPath,
   type GasStationBackend,
   type GasStationHandler,
+  type GasStationTier,
 } from './gas-station-backend.js';
 import {
   SOLANA_PUBKEY_REGEX,
@@ -258,6 +268,12 @@ export interface GasStationDescribeResponse {
      * `GET /ilp` to answer.
      */
     handlerPaths: { any: string; quote: string; execute: string };
+    /**
+     * Execute doors with their own ceilings, when configured: the operator
+     * sells a route per job shape, and the quote receipt's `tier` says which
+     * one a given transaction needs.
+     */
+    executeTiers?: { name: string; path: string; maxLamports: string }[];
   };
   /** The registered kinds, bare. Kept for callers that only want the numbers. */
   handlerKinds: number[];
@@ -339,6 +355,8 @@ export interface GasStationEnvConfig {
   quoteTtlMs?: number;
   /** Per-job ceiling override in lamports (see GAS_STATION_MAX_LAMPORTS_CEILING). */
   maxLamportsCeiling?: bigint;
+  /** Execute doors with their own ceilings (see GAS_STATION_TIERS_JSON), ascending. */
+  tiers?: GasStationTier[];
 }
 
 /**
@@ -411,6 +429,11 @@ export function resolveGasStationEnv(
     maxLamportsCeiling = BigInt(ceilingRaw);
   }
 
+  const tiers = resolveTiers(
+    env['GAS_STATION_TIERS_JSON'],
+    maxLamportsCeiling ?? DEFAULT_POLICY.maxLamportsCeiling
+  );
+
   return {
     network: networkRaw,
     solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')),
@@ -418,7 +441,71 @@ export function resolveGasStationEnv(
     ...(channelProgramId ? { channelProgramId } : {}),
     ...(quoteTtlMs !== undefined ? { quoteTtlMs } : {}),
     ...(maxLamportsCeiling !== undefined ? { maxLamportsCeiling } : {}),
+    ...(tiers !== undefined ? { tiers } : {}),
   };
+}
+
+const TIER_NAME_REGEX = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * Parse `GAS_STATION_TIERS_JSON`. Absent or empty ⇒ no tier doors; malformed
+ * ⇒ throw naming the index. Every ceiling must be positive and not above the
+ * per-job ceiling (a door the policy would refuse anyway is a lie in
+ * /describe). Returned ascending by ceiling, which is the order the quote
+ * picks from.
+ */
+export function resolveTiers(
+  raw: string | undefined,
+  ceiling: bigint
+): GasStationTier[] | undefined {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      `GAS_STATION_TIERS_JSON is not valid JSON: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('GAS_STATION_TIERS_JSON must be a non-empty JSON array of {name, maxLamports}');
+  }
+  const seen = new Set<string>();
+  const tiers = parsed.map((entry: unknown, i: number): GasStationTier => {
+    if (entry === null || typeof entry !== 'object') {
+      throw new Error(`GAS_STATION_TIERS_JSON[${i}] must be an object {name, maxLamports}`);
+    }
+    const { name, maxLamports } = entry as { name?: unknown; maxLamports?: unknown };
+    if (typeof name !== 'string' || !TIER_NAME_REGEX.test(name)) {
+      throw new Error(
+        `GAS_STATION_TIERS_JSON[${i}].name must match ${TIER_NAME_REGEX} (it is a URL path segment), got ${JSON.stringify(name)}`
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(`GAS_STATION_TIERS_JSON[${i}].name ${JSON.stringify(name)} is a duplicate`);
+    }
+    seen.add(name);
+    const lamportsText =
+      typeof maxLamports === 'number' && Number.isInteger(maxLamports)
+        ? String(maxLamports)
+        : typeof maxLamports === 'string'
+          ? maxLamports.trim()
+          : '';
+    if (!/^[0-9]+$/.test(lamportsText) || BigInt(lamportsText) <= 0n) {
+      throw new Error(
+        `GAS_STATION_TIERS_JSON[${i}].maxLamports must be a positive integer of lamports, got ${JSON.stringify(maxLamports)}`
+      );
+    }
+    const value = BigInt(lamportsText);
+    if (value > ceiling) {
+      throw new Error(
+        `GAS_STATION_TIERS_JSON[${i}].maxLamports ${value} is above the per-job ceiling ${ceiling}`
+      );
+    }
+    return { name, maxLamports: value };
+  });
+  return tiers.sort((a, b) => (a.maxLamports < b.maxLamports ? -1 : a.maxLamports > b.maxLamports ? 1 : 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -551,10 +638,12 @@ export function buildHandlers(
   handlers: Record<number, GasStationHandler>;
   describe: string[];
   jobs: JobKindDescription[];
+  tiers: GasStationTier[];
 } {
   const handlers: Record<number, GasStationHandler> = {};
   const describe: string[] = [];
   const jobs: JobKindDescription[] = [];
+  let tiers: GasStationTier[] = [];
 
   const solana = resolveGasStationEnv(env);
   if (solana) {
@@ -566,6 +655,7 @@ export function buildHandlers(
         ...(solana.rpcUrl ? { rpcUrl: solana.rpcUrl } : {}),
         ...(solana.channelProgramId ? { channelProgramId: solana.channelProgramId } : {}),
         ...(solana.quoteTtlMs !== undefined ? { quoteTtlMs: solana.quoteTtlMs } : {}),
+        ...(solana.tiers !== undefined ? { tiers: solana.tiers } : {}),
         // A lowered ceiling also clamps the no-draft allowance: a quote the
         // node would then refuse to execute is not a quote worth handing out.
         ...(solana.maxLamportsCeiling !== undefined
@@ -584,8 +674,10 @@ export function buildHandlers(
     describe.push(
       `kind:${GAS_STATION_KIND} Solana (network: ${solana.network}` +
         `${solana.channelProgramId ? `, channel program: ${solana.channelProgramId}` : ''}` +
-        `, per-job ceiling: ${solana.maxLamportsCeiling ?? DEFAULT_POLICY.maxLamportsCeiling} lamports)`
+        `, per-job ceiling: ${solana.maxLamportsCeiling ?? DEFAULT_POLICY.maxLamportsCeiling} lamports` +
+        `${solana.tiers ? `, tiers: ${solana.tiers.map((t) => `${t.name}≤${t.maxLamports}`).join(' ')}` : ''})`
     );
+    tiers = solana.tiers ?? [];
     jobs.push({
       kind: GAS_STATION_KIND,
       resultKind: GAS_STATION_KIND + 1000,
@@ -627,7 +719,7 @@ export function buildHandlers(
     );
   }
 
-  return { handlers, describe, jobs };
+  return { handlers, describe, jobs, tiers };
 }
 
 // ---------------------------------------------------------------------------
@@ -639,7 +731,7 @@ async function main(): Promise<void> {
 
   const config = resolvePortConfig(process.env);
   const counter = createJobCounter();
-  const { handlers, describe, jobs } = buildHandlers(process.env, counter);
+  const { handlers, describe, jobs, tiers } = buildHandlers(process.env, counter);
   for (const line of describe) console.log(`[gas-station] registered ${line}`);
 
   // Prove the Solana key can actually sign before advertising that it will.
@@ -668,6 +760,7 @@ async function main(): Promise<void> {
     handlers,
     handlerPort: config.handlerPort,
     devMode,
+    tiers,
   });
 
   const pubkey = getPublicKey(config.secretKey);
@@ -703,6 +796,15 @@ async function main(): Promise<void> {
         resultDelivery: 'ilp-fulfill-body',
         refusals: 'in-band',
         handlerPaths: { ...HANDLER_PATHS },
+        ...(tiers.length > 0
+          ? {
+              executeTiers: tiers.map((t) => ({
+                name: t.name,
+                path: tierPath(t.name),
+                maxLamports: t.maxLamports.toString(),
+              })),
+            }
+          : {}),
       },
       handlerKinds,
       jobs,

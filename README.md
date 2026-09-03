@@ -246,6 +246,8 @@ The vocabularies are closed sets — `GasStationFailureReason` and
   bypass signature described above.
 - `quote_expired`, `blockhash_expired`, `blockhash_mismatch` — re-quote and
   rebuild.
+- `tier_exceeded` — the job costs more than the door it came through allows;
+  pay the route for the tier the quote (and this refusal) named.
 - `confirmation_timeout` — broadcast, not confirmed in time. **Retry with the
   same `idempotencyKey`.**
 
@@ -286,11 +288,44 @@ price       = 1750000   # ≈ what GAS_STATION_MAX_LAMPORTS_CEILING buys today
 ```
 
 and sets `GAS_STATION_MAX_LAMPORTS_CEILING` to what that execute price buys,
-so no single job can cost the float more than its caller paid for it. This is
-as far as per-route pricing goes: an execute still pays the ceiling whether it
-lands a 5,000-lamport transfer or a 16,000,000-lamport spawn. Pricing a job at
-what its quote said needs the connector to enforce an amount the app names,
-which is a connector change and tracked there.
+so no single job can cost the float more than its caller paid for it.
+
+### A route per job shape: tiers
+
+An execute still pays that ceiling whether it lands a 10,000-lamport transfer
+or a 16,000,000-lamport spawn, and the connector can have as many routes as
+you like. So the app opens one execute door per **tier**, each with its own
+ceiling:
+
+```
+GAS_STATION_TIERS_JSON=[{"name":"transfer","maxLamports":100000},{"name":"ant","maxLamports":16500000}]
+```
+
+opens `POST /gas/execute/transfer` and `POST /gas/execute/ant`, listed under
+`transport.executeTiers` in `/describe`. The operator sells each at its own
+price:
+
+```toml
+[[routes]]
+prefix      = "g.example.gas.transfer"
+handler_url = "http://gas-station:3300/gas/execute/transfer"
+price       = 12000        # ≈ 100,000 lamports
+
+[[routes]]
+prefix      = "g.example.gas.ant"
+handler_url = "http://gas-station:3300/gas/execute/ant"
+price       = 1750000      # ≈ 16,500,000 lamports
+```
+
+The door is what keeps the cheap route cheap. A quote's `maxLamports` is what
+simulation said the job costs (plus headroom), and the quote receipt names the
+cheapest tier that covers it as `tier` (or `null` when only the untiered
+`/gas/execute` door will). An execute through a door whose ceiling is under
+the quote is refused in-band as `tier_exceeded`, naming the tier it should
+have paid for, so a 16M-lamport spawn cannot ride the transfer route. The
+untiered `/gas/execute` door stays available at the full ceiling for whatever
+fits no tier. Tier doors serve kind:5096 only; a lamport ceiling means nothing
+to the EVM relay.
 
 Learned on the first mainnet deployment (2026-09-03): one door at a flat
 500,000 was the only honest number available, and it overcharged every quote.
@@ -310,6 +345,7 @@ comment and in [`deploy/.env.example`](./deploy/.env.example).
 | `GAS_STATION_CHANNEL_PROGRAM_ID` | enables mitigation (e) for the TOON channel program |
 | `GAS_STATION_QUOTE_TTL_MS` | raises the merged quote/blockhash deadline |
 | `GAS_STATION_MAX_LAMPORTS_CEILING` | per-job ceiling override in lamports (default 20,000,000); clamps the no-draft allowance too |
+| `GAS_STATION_TIERS_JSON` | execute doors with their own ceilings, `[{name, maxLamports}, …]`; one route per job shape |
 | `EVM_GAS_STATION_CONFIG_JSON` | enables kind:5098 — a JSON array of chains |
 | `EVM_GAS_STATION_QUOTE_TTL_MS` / `EVM_GAS_STATION_MAX_GAS` | override 120s / 300,000 |
 

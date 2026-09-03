@@ -82,6 +82,7 @@ import {
 import type {
   GasStationHandlerContext,
   GasStationHandlerResponse,
+  GasStationTier,
 } from './gas-station-backend.js';
 import {
   paramTag,
@@ -232,6 +233,7 @@ export type GasStationFailureReason =
   | 'delta_cap_exceeded'
   | 'float_exhausted'
   | 'quote_refused'
+  | 'tier_exceeded'
   | 'confirmation_timeout'
   | 'broadcast_failed';
 
@@ -733,6 +735,12 @@ export interface GasStationQuoteReceipt {
   recentBlockhash: string;
   /** ms epoch — the merged quote/blockhash deadline. */
   expiresAt: number;
+  /**
+   * Present when this deployment has tiers: the cheapest tier door whose
+   * ceiling covers `maxLamports`, or null when only the untiered execute
+   * door will. Pay the route the operator sells for that tier.
+   */
+  tier?: string | null;
 }
 
 export interface GasStationExecuteReceipt {
@@ -796,6 +804,12 @@ export interface GasStationConfig {
    * Solana blockhash stays valid or execute rejects with `blockhash_expired`.
    */
   quoteTtlMs?: number;
+  /**
+   * Execute doors with their own ceilings (see {@link GasStationTier}). The
+   * quote names the cheapest that fits; an execute through a door whose
+   * ceiling is under the quote is refused `tier_exceeded`.
+   */
+  tiers?: GasStationTier[];
   /** Clock seam for deadline tests. */
   now?: () => number;
   /** Confirmation polling seam (ms) — tests shrink these. */
@@ -824,6 +838,11 @@ export function createGasStationHandler(
   const confirmIntervalMs = config.confirm?.intervalMs ?? 2_000;
   const quotes = new Map<string, QuoteRecord>();
   const idempotency = new Map<string, GasStationExecuteReceipt>();
+  const tiers = config.tiers === undefined
+    ? undefined
+    : [...config.tiers].sort((a, b) => (a.maxLamports < b.maxLamports ? -1 : a.maxLamports > b.maxLamports ? 1 : 0));
+  const tierFor = (maxLamports: bigint): string | null =>
+    tiers?.find((t) => t.maxLamports >= maxLamports)?.name ?? null;
 
   let depsPromise: Promise<{ deps: GasStationDeps; policy: GasStationPolicy }> | undefined;
   const getDeps = () => {
@@ -937,13 +956,15 @@ export function createGasStationHandler(
       maxLamports: record.maxLamports.toString(),
       recentBlockhash: record.blockhash,
       expiresAt: record.expiresAt,
+      ...(tiers === undefined ? {} : { tier: tierFor(record.maxLamports) }),
     });
   }
 
   async function runExecute(
     event: NostrEvent,
     deps: GasStationDeps,
-    policy: GasStationPolicy
+    policy: GasStationPolicy,
+    tier: GasStationTier | undefined
   ): Promise<GasStationHandlerResponse> {
     const wireBase64 = paramTag(event, 'transaction');
     const quoteId = paramTag(event, 'quoteId');
@@ -968,6 +989,17 @@ export function createGasStationHandler(
     }
     if (now() > quote.expiresAt) {
       return failed('execute', 'quote_expired', `quote ${quoteId} expired at ${new Date(quote.expiresAt).toISOString()} — re-quote and re-sign`);
+    }
+    // A tier door only executes what its ceiling covers. The quote's cap is
+    // what simulation said this transaction costs (plus headroom), so a job
+    // quoted above the door is a job trying to ride a cheaper route.
+    if (tier !== undefined && quote.maxLamports > tier.maxLamports) {
+      return failed(
+        'execute',
+        'tier_exceeded',
+        `quote ${quoteId} caps at ${quote.maxLamports} lamports, above tier "${tier.name}" (${tier.maxLamports}) — ` +
+          `pay the route for tier ${tierFor(quote.maxLamports) ?? '(none: the untiered execute door)'}`
+      );
     }
 
     // ── Mitigations (b) + (d): the static gate ──────────────────────────────
@@ -1086,7 +1118,7 @@ export function createGasStationHandler(
       const { deps, policy } = await getDeps();
       return phase === 'quote'
         ? await runQuote(event, deps, policy)
-        : await runExecute(event, deps, policy);
+        : await runExecute(event, deps, policy, ctx.tier);
     } catch (err) {
       return ctx.reject('T00', `gas-station ${phase} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
