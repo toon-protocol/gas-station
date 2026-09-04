@@ -60,7 +60,7 @@ the shared skills:
 /plugin marketplace add toon-protocol/toon-meta
 /plugin install toon-skills@toon-meta
 ```
-Canonical rules/decisions: `toon-meta` → `_bmad-output/project-context.md`.
+Canonical rules/decisions: `toon-meta` → `context/context.md`.
 
 ## Cross-repo dependencies
 - Depends on no TOON package at runtime. The handler context/response types are
