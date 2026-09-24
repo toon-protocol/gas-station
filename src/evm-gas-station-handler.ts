@@ -33,11 +33,15 @@
  *      bypass attempt and is ALARM-logged. Reason: `gas_cap_exceeded`
  *      (post-simulation) / `simulation_failed` (revert).
  *  (d) FUNCTION-SELECTOR WHITELIST: only `TokenNetwork.setTotalDeposit`
- *      (deposit), `closeChannel` (close) and `settleChannel` (settle) —
- *      deliberately excluding `openChannel` and `claimFromChannel`, mirroring
- *      kind:5096's exclusion of `INITIALIZE_CHANNEL`/`CLAIM_FROM_CHANNEL`:
- *      opening a channel and claiming via a balance proof are not "an agent
- *      reclaiming its own collateral". Reason: `selector_not_whitelisted`.
+ *      (deposit), `closeChannel` (close), `settleChannel` (settle) and
+ *      `claimFromChannel` (a swap party redeeming a counterparty's balance
+ *      proof on a chain where it holds no gas) — deliberately excluding
+ *      `openChannel`, which is not "an agent reclaiming its own collateral".
+ *      `claimFromChannel` needs no calldata bind: it takes no recipient, the
+ *      contract resolves the claimant from `_msgSender()` — the forward
+ *      request's signed `from` — and requires them to be a channel
+ *      participant, so a claim can only ever pay the party that signed it.
+ *      Reason: `selector_not_whitelisted`.
  *
  * SIGNATURE/TRUST/NONCE validity is delegated to the forwarder's own
  * `verify(request)` view call rather than reimplemented here — it is the one
@@ -209,16 +213,17 @@ export function parseForwardRequest(raw: unknown): ForwardRequestData | null {
 // ---------------------------------------------------------------------------
 
 /**
- * The three `TokenNetwork` operations an agent needs to fund or reclaim its
- * own channel without holding native gas — mirrors
+ * The `TokenNetwork` operations an agent needs to fund, reclaim or redeem on
+ * its own channel without holding native gas — mirrors
  * `TOON_CHANNEL_DISCRIMINATORS` in `src/solana-gas-station-handler.ts`.
- * `openChannel`/`claimFromChannel` are deliberately excluded (out of scope
- * for issue #68, same rationale as issue #67's Solana whitelist).
+ * `openChannel` is deliberately excluded.
  */
 export const TOKEN_NETWORK_FUNCTION_WHITELIST = {
   DEPOSIT: 'setTotalDeposit(bytes32,address,uint256)',
   CLOSE_CHANNEL: 'closeChannel(bytes32)',
   SETTLE_CHANNEL: 'settleChannel(bytes32)',
+  CLAIM_FROM_CHANNEL:
+    'claimFromChannel(bytes32,(bytes32,uint256,uint256,uint256,bytes32),bytes)',
 } as const;
 
 function selectorOf(signature: string): string {
@@ -309,7 +314,7 @@ function fail(
  *  1. `request.to` must be exactly the configured `TokenNetwork` address —
  *     the relayer never forwards to an arbitrary contract;
  *  2. the first 4 bytes of `request.data` must be one of
- *     {@link TOKEN_NETWORK_SELECTOR_WHITELIST} (deposit / close / settle);
+ *     {@link TOKEN_NETWORK_SELECTOR_WHITELIST} (deposit / close / settle / claim);
  *  3. `request.value` must not exceed the policy cap (default 0 — channel
  *     ops move ERC-20, not native value);
  *  4. `request.gas` must not exceed the policy cap;
@@ -334,7 +339,7 @@ export function inspectForwardRequest(
   if (!policy.selectorWhitelist.has(selector)) {
     return fail(
       'selector_not_whitelisted',
-      `selector ${selector} is not one of the permitted TokenNetwork operations (deposit / close / settle)`
+      `selector ${selector} is not one of the permitted TokenNetwork operations (deposit / close / settle / claim)`
     );
   }
 

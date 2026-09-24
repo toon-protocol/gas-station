@@ -40,13 +40,22 @@
  *      `GasStationPolicy.channelProgramId` is configured, instructions
  *      against it are additionally restricted to the deposit / close /
  *      settle operations ({@link TOON_CHANNEL_DISCRIMINATORS}) — the ops an
- *      agent needs to fund or reclaim its own channel without holding SOL.
- *      Anything else (e.g. opening a channel, claiming via a balance proof)
- *      is refused as `channel_op_not_permitted`, regardless of whether it
- *      references the fee payer. Like the ar.io programs, the fee payer has
- *      no legitimate account slot in any of these three instructions — it
- *      only ever pays as the transaction fee payer — so a permitted op that
- *      DOES reference it is still `dvm_key_misplaced`. The program id is
+ *      agent needs to fund or reclaim its own channel without holding SOL —
+ *      plus `CLAIM_FROM_CHANNEL` in exactly one shape: `[Ed25519SigVerify,
+ *      CLAIM_FROM_CHANNEL]`. That is how a swap party redeems a
+ *      counterparty's balance proof on a chain where it holds no gas. The
+ *      claimer is NOT a signer of that instruction: its authority is the
+ *      Ed25519 precompile at index 0, and the instruction moves no tokens —
+ *      it records the payer's own signed proof in the payer's own slot,
+ *      bounded by the payer's deposit (value leaves the vault at settle).
+ *      So anyone may submit it and there is nothing to grief; the bind is
+ *      structural, not "the claimer is the job's signer". Anything else
+ *      (e.g. opening a channel) is refused as `channel_op_not_permitted`,
+ *      regardless of whether it references the fee payer. Like the ar.io programs, the fee payer has
+ *      no legitimate account slot in deposit / close / settle — it only ever
+ *      pays as the transaction fee payer — so a permitted op that DOES
+ *      reference it is still `dvm_key_misplaced`. `CLAIM_FROM_CHANNEL` names
+ *      the submitter (fee payer) in its account 0 and nowhere else. The program id is
  *      configured, never hardcoded here: unlike the cluster-invariant ids
  *      above, this address belongs to a particular connector deployment and
  *      rotates with it. It is the `program_id` the connector in front of this
@@ -148,21 +157,29 @@ export const COMPUTE_BUDGET_PROGRAM =
   'ComputeBudget111111111111111111111111111111';
 /** Metaplex Core (canonical program id, same on devnet + mainnet). */
 export const MPL_CORE_PROGRAM = 'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d';
+/**
+ * The native Ed25519 signature-verify precompile. Deliberately NOT part of any
+ * program whitelist: it is admitted only by the structural claim rule in
+ * {@link inspectGasStationTransaction}, at instruction index 0, in front of a
+ * `CLAIM_FROM_CHANNEL`. A literal, like every other id here.
+ */
+export const ED25519_PROGRAM = 'Ed25519SigVerify111111111111111111111111111';
 
 /**
  * TOON payment-channel program instruction discriminators (8-byte LE opcode,
  * no Anchor sighash — mirrors `DISCRIMINATORS` in
  * `@toon-protocol/connector`'s `solana-payment-channel-sdk.ts`, the only
- * source of truth for this wire format). Only these three are permitted
- * through the gas-station whitelist (mitigation e) — `INITIALIZE_CHANNEL`
- * and `CLAIM_FROM_CHANNEL` are deliberately excluded (out of scope for
- * issue #67: opening a channel and claiming via a balance proof are not
- * "an agent reclaiming its own collateral").
+ * source of truth for this wire format). Only these are permitted through the
+ * gas-station whitelist (mitigation e) — `INITIALIZE_CHANNEL` stays excluded
+ * (opening a channel is not "an agent reclaiming its own collateral").
+ * `CLAIM_FROM_CHANNEL` is admitted only in its structural shape, see
+ * {@link inspectGasStationTransaction} rule 7.
  */
 export const TOON_CHANNEL_DISCRIMINATORS = {
   DEPOSIT: new Uint8Array([0x02, 0, 0, 0, 0, 0, 0, 0]),
   CLOSE_CHANNEL: new Uint8Array([0x03, 0, 0, 0, 0, 0, 0, 0]),
   SETTLE_CHANNEL: new Uint8Array([0x04, 0, 0, 0, 0, 0, 0, 0]),
+  CLAIM_FROM_CHANNEL: new Uint8Array([0x06, 0, 0, 0, 0, 0, 0, 0]),
 } as const;
 
 /**
@@ -320,7 +337,15 @@ function matchesDiscriminator(data: Uint8Array, disc: Uint8Array): boolean {
  *     regardless of whether the instruction references the fee payer. Like
  *     ar.io, the fee payer has no legitimate slot in these instructions, so
  *     one that DOES reference it is `dvm_key_misplaced` even when the op
- *     itself is permitted.
+ *     itself is permitted;
+ *  7. `CLAIM_FROM_CHANNEL` (the swap redeem) is admitted only as
+ *     `[Ed25519SigVerify, CLAIM_FROM_CHANNEL]` — the precompile at index 0
+ *     (that is where the program reads the proof), the claim at index 1, and
+ *     nothing but ComputeBudget besides. The fee payer may appear in the
+ *     claim's account 0 (the submitter slot) and nowhere else, and never in
+ *     the precompile. An `Ed25519SigVerify` anywhere else is refused, and it
+ *     is not on {@link GasStationPolicy.programWhitelist}: it exists only in
+ *     this shape, and only when a channel program is configured.
  */
 /**
  * `JSON.stringify` for a value that came off the RPC.
@@ -405,10 +430,45 @@ export function inspectGasStationTransaction(
   let cuLimit: bigint | null = null;
   let cuPriceMicroLamports: bigint | null = null;
 
+  const programOf = (n: number): string | undefined => {
+    const ix = compiled.instructions[n];
+    return ix === undefined ? undefined : accounts[ix.programAddressIndex];
+  };
+  const isClaimIx = (n: number): boolean => {
+    const ix = compiled.instructions[n];
+    return (
+      policy.channelProgramId !== undefined &&
+      programOf(n) === policy.channelProgramId &&
+      matchesDiscriminator(ix?.data ?? new Uint8Array(0), TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL)
+    );
+  };
+
   for (const [i, ix] of compiled.instructions.entries()) {
     const program = accounts[ix.programAddressIndex];
     if (program === undefined) {
       return fail('malformed_transaction', `instruction ${i} has an out-of-range program index`);
+    }
+
+    // Rule 7: the Ed25519 precompile exists only in front of a claim.
+    if (program === ED25519_PROGRAM && policy.channelProgramId !== undefined) {
+      if (i !== 0 || !isClaimIx(1)) {
+        return fail(
+          'channel_op_not_permitted',
+          `instruction ${i}: Ed25519SigVerify is admitted only at index 0, directly followed by CLAIM_FROM_CHANNEL`
+        );
+      }
+      for (let j = 2; j < compiled.instructions.length; j++) {
+        if (programOf(j) !== COMPUTE_BUDGET_PROGRAM) {
+          return fail(
+            'channel_op_not_permitted',
+            `instruction ${j}: a claim transaction is exactly [Ed25519SigVerify, CLAIM_FROM_CHANNEL] plus ComputeBudget`
+          );
+        }
+      }
+      if ((ix.accountIndices ?? []).includes(0)) {
+        return fail('dvm_key_misplaced', `instruction ${i}: Ed25519SigVerify must not reference the gas wallet`);
+      }
+      continue;
     }
     if (!policy.programWhitelist.has(program)) {
       return fail(
@@ -436,13 +496,32 @@ export function inspectGasStationTransaction(
     }
 
     if (policy.channelProgramId !== undefined && program === policy.channelProgramId) {
+      if (isClaimIx(i)) {
+        if (i !== 1 || programOf(0) !== ED25519_PROGRAM) {
+          return fail(
+            'channel_op_not_permitted',
+            `instruction ${i}: CLAIM_FROM_CHANNEL is admitted only at index 1, after an Ed25519SigVerify at index 0`
+          );
+        }
+        // Submitter slot only: the fee payer is account 0 of the claim and
+        // may not be the claimer, the channel or anything else.
+        if (indices.slice(1).includes(0)) {
+          return fail(
+            'dvm_key_misplaced',
+            `instruction ${i}: the gas wallet may appear in CLAIM_FROM_CHANNEL only as the submitter (account 0)`
+          );
+        }
+        continue;
+      }
+      // CLAIM_FROM_CHANNEL is listed here but was already handled (and
+      // `continue`d) above: it is admitted only in its structural shape.
       const permitted = Object.values(TOON_CHANNEL_DISCRIMINATORS).some((disc) =>
         matchesDiscriminator(data, disc)
       );
       if (!permitted) {
         return fail(
           'channel_op_not_permitted',
-          `instruction ${i}: TOON channel-program instruction is not one of the permitted operations (deposit / close / settle)`
+          `instruction ${i}: TOON channel-program instruction is not one of the permitted operations (deposit / close / settle / claim)`
         );
       }
       if (referencesFeePayer) {
