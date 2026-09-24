@@ -174,10 +174,25 @@ A transaction that passes (b) and then shows an over-cap debit in (c) is not a
 near miss — it is the signature of an inspection bypass, and both handlers
 log it as an ALARM before refusing.
 
-**Opening a channel and claiming from one are deliberately excluded.** (e)
-permits exactly the operations an agent needs to fund or reclaim *its own*
-collateral. `INITIALIZE_CHANNEL` and `claimFromChannel` are not that, and a
-gas station has no business co-signing them.
+**Opening a channel is deliberately excluded; claiming is admitted, in one
+shape.** (e) permits the operations an agent needs to fund, reclaim or redeem
+on *its own* channel. `INITIALIZE_CHANNEL` / `openChannel` are not that, and a
+gas station has no business co-signing them. `CLAIM_FROM_CHANNEL` /
+`claimFromChannel` is how a swap party cashes a counterparty's balance proof on
+a chain where it holds no gas, and it is safe to sponsor because it can only
+record a payer's own signed proof:
+
+- **Solana**: only as exactly `[Ed25519SigVerify, CLAIM_FROM_CHANNEL]` (plus
+  ComputeBudget). The claimer is not a signer — the precompile at index 0 is its
+  authority — so there is no "claimer must be the job's signer" rule; the bind
+  is structural. The precompile is admitted only at index 0 in front of the
+  claim; the fee payer may appear only in the claim's account 0 (the submitter)
+  and nowhere else. Anything else is `channel_op_not_permitted` or
+  `dvm_key_misplaced`.
+- **EVM**: `claimFromChannel` is on the selector whitelist. It takes no recipient
+  argument; the contract pays `_msgSender()`, the forward request's signed
+  `from`, and only if that is a channel participant — so the claimant is the
+  signer by construction and no extra reason code is needed.
 
 On the EVM side, signature, nonce and deadline validity are delegated to the
 forwarder's own `verify(request)` view call rather than re-derived offline.

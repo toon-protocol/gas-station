@@ -35,6 +35,7 @@ import {
   MPL_CORE_PROGRAM,
   SYSTEM_PROGRAM,
   TOON_CHANNEL_DISCRIMINATORS,
+  ED25519_PROGRAM,
   type GasStationDeps,
   type GasStationExecuteReceipt,
   type GasStationFailureReceipt,
@@ -172,6 +173,11 @@ function policyWith(overrides: Partial<GasStationPolicy> = {}): GasStationPolicy
     ]),
     ...overrides,
   };
+}
+
+function policyWithoutChannel(): GasStationPolicy {
+  const { channelProgramId: _omit, ...rest } = policyWith();
+  return rest;
 }
 
 // ── inspectGasStationTransaction (mitigations b + d) ────────────────────────
@@ -338,6 +344,163 @@ describe('inspectGasStationTransaction', () => {
     expect(inspectGasStationTransaction(wire, policyWith())).toMatchObject({
       ok: false,
       reason: 'channel_op_not_permitted',
+    });
+  });
+
+  describe('claim from channel (swap redeem)', () => {
+    const claimAccounts = (client: string, feePayerSlot = GAS) => [
+      { address: feePayerSlot, role: 3 }, // submitter (fee payer, signer, writable)
+      { address: client, role: 0 }, // claimer — NOT a signer; the ed25519 ix authorises
+      { address: ANT_PROGRAM, role: 1 }, // channel PDA (fixture)
+      { address: SYSTEM_PROGRAM, role: 0 }, // instructions sysvar (fixture)
+    ];
+    const ed25519Ix = (accounts: { address: string; role: number }[] = []): Instruction =>
+      ({
+        programAddress: address(ED25519_PROGRAM),
+        accounts: accounts.map((a) => ({ address: address(a.address), role: a.role })),
+        data: new Uint8Array([1, 0]),
+      }) as Instruction;
+    const policyWithoutEd25519Listed = () =>
+      policyWith({
+        programWhitelist: new Set([
+          SYSTEM_PROGRAM,
+          COMPUTE_BUDGET_PROGRAM,
+          MPL_CORE_PROGRAM,
+          ANT_PROGRAM,
+          CHANNEL_PROGRAM,
+        ]),
+      });
+
+    it('admits exactly [Ed25519SigVerify, CLAIM_FROM_CHANNEL] with the fee payer only in claim slot 0', async () => {
+      const { address: client } = await clientKeyPair();
+      const wire = await buildTx(
+        [ed25519Ix(), channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, claimAccounts(client))],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(wire, policyWithoutEd25519Listed()).ok).toBe(true);
+    });
+
+    it('still admits it with a trailing ComputeBudget instruction', async () => {
+      const { address: client } = await clientKeyPair();
+      const wire = await buildTx(
+        [
+          ed25519Ix(),
+          channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, claimAccounts(client)),
+          computeBudgetIx(2, 100_000n),
+        ],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(wire, policyWithoutEd25519Listed()).ok).toBe(true);
+    });
+
+    it('DRILL: Ed25519SigVerify at index 1 is refused', async () => {
+      const { address: client } = await clientKeyPair();
+      const wire = await buildTx(
+        [channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, claimAccounts(client)), ed25519Ix()],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(wire, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'channel_op_not_permitted',
+      });
+    });
+
+    it('DRILL: CLAIM_FROM_CHANNEL without a preceding Ed25519SigVerify is refused', async () => {
+      const { address: client } = await clientKeyPair();
+      const wire = await buildTx(
+        [channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, claimAccounts(client))],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(wire, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'channel_op_not_permitted',
+      });
+    });
+
+    it('DRILL: Ed25519SigVerify followed by anything but a claim is refused', async () => {
+      const { address: client } = await clientKeyPair();
+      const wire = await buildTx([ed25519Ix(), memoIx(), channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, claimAccounts(client))], {
+        sign: false,
+      });
+      expect(inspectGasStationTransaction(wire, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'channel_op_not_permitted',
+      });
+    });
+
+    it('DRILL: Ed25519SigVerify alone, or referencing the fee payer, is refused', async () => {
+      const { address: client } = await clientKeyPair();
+      const alone = await buildTx([ed25519Ix()], { sign: false });
+      expect(inspectGasStationTransaction(alone, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'channel_op_not_permitted',
+      });
+      const touching = await buildTx(
+        [
+          ed25519Ix([{ address: GAS, role: 1 }]),
+          channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, claimAccounts(client)),
+        ],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(touching, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'dvm_key_misplaced',
+      });
+    });
+
+    it('DRILL: Ed25519SigVerify is not admitted when no channel program is configured', async () => {
+      const wire = await buildTx([ed25519Ix()], { sign: false });
+      expect(
+        inspectGasStationTransaction(wire, policyWithoutChannel())
+      ).toMatchObject({ ok: false, reason: 'program_not_whitelisted' });
+    });
+
+    it('DRILL: the fee payer as claimer (or anywhere past slot 0) is dvm_key_misplaced', async () => {
+      const { address: client } = await clientKeyPair();
+      const asClaimer = await buildTx(
+        [
+          ed25519Ix(),
+          channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, [
+            { address: GAS, role: 3 },
+            { address: GAS, role: 1 },
+            { address: ANT_PROGRAM, role: 1 },
+            { address: SYSTEM_PROGRAM, role: 0 },
+          ]),
+        ],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(asClaimer, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'dvm_key_misplaced',
+      });
+      const inChannelSlot = await buildTx(
+        [
+          ed25519Ix(),
+          channelIx(TOON_CHANNEL_DISCRIMINATORS.CLAIM_FROM_CHANNEL, [
+            { address: client, role: 3 },
+            { address: client, role: 0 },
+            { address: GAS, role: 1 },
+            { address: SYSTEM_PROGRAM, role: 0 },
+          ]),
+        ],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(inChannelSlot, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'dvm_key_misplaced',
+      });
+    });
+
+    it('DRILL: INITIALIZE_CHANNEL stays refused even after an Ed25519SigVerify', async () => {
+      const { address: client } = await clientKeyPair();
+      const wire = await buildTx(
+        [ed25519Ix(), channelIx(new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0]), claimAccounts(client))],
+        { sign: false }
+      );
+      expect(inspectGasStationTransaction(wire, policyWithoutEd25519Listed())).toMatchObject({
+        ok: false,
+        reason: 'channel_op_not_permitted',
+      });
     });
   });
 

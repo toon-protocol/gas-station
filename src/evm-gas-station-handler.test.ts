@@ -85,10 +85,11 @@ describe('inspectForwardRequest', () => {
     expect(res.ok).toBe(true);
   });
 
-  it('accepts deposit and close selectors too', () => {
+  it('accepts deposit, close and claimFromChannel selectors too', () => {
     for (const sig of [
       TOKEN_NETWORK_FUNCTION_WHITELIST.DEPOSIT,
       TOKEN_NETWORK_FUNCTION_WHITELIST.CLOSE_CHANNEL,
+      TOKEN_NETWORK_FUNCTION_WHITELIST.CLAIM_FROM_CHANNEL,
     ]) {
       const res = inspectForwardRequest(
         forwardRequest({ data: selector(sig) + 'ab'.repeat(32) }),
@@ -110,7 +111,7 @@ describe('inspectForwardRequest', () => {
     expect(res).toMatchObject({ ok: false, reason: 'target_not_whitelisted' });
   });
 
-  it('DRILL: openChannel (not deposit/close/settle) is selector_not_whitelisted', () => {
+  it('DRILL: openChannel (not deposit/close/settle/claim) is selector_not_whitelisted', () => {
     const res = inspectForwardRequest(
       forwardRequest({ data: OPEN_CHANNEL_SELECTOR + 'ab'.repeat(32) }),
       chain(),
@@ -381,6 +382,20 @@ describe('createEvmGasStationHandler', () => {
     expect(deps.verifyRequest).not.toHaveBeenCalled();
   });
 
+  it('quotes and executes a claimFromChannel forward request', async () => {
+    const { handler, sent } = makeHandler();
+    const { executeParams } = await quoteThenExecuteParams(
+      handler,
+      { data: selector(TOKEN_NETWORK_FUNCTION_WHITELIST.CLAIM_FROM_CHANNEL) + 'ab'.repeat(32) },
+      'idem-claim'
+    );
+    const receipt = decodeReceipt<EvmGasStationExecuteReceipt>(
+      await handler(ctxFor(jobEvent(executeParams)))
+    );
+    expect(receipt.status).toBe('ok');
+    expect(sent).toHaveLength(1);
+  });
+
   it('DRILL: openChannel selector is selector_not_whitelisted, nothing simulated or sent', async () => {
     const { handler, deps, sent } = makeHandler();
     const { executeParams } = await quoteThenExecuteParams(handler, {
@@ -557,8 +572,9 @@ describe('createEvmGasStationHandler', () => {
 });
 
 describe('TOKEN_NETWORK_SELECTOR_WHITELIST', () => {
-  it('contains exactly deposit/close/settle, excluding open/claim', () => {
-    expect(TOKEN_NETWORK_SELECTOR_WHITELIST.size).toBe(3);
+  it('contains exactly deposit/close/settle/claim, excluding open', () => {
+    expect(TOKEN_NETWORK_SELECTOR_WHITELIST.size).toBe(4);
+    expect(TOKEN_NETWORK_SELECTOR_WHITELIST.has(selector(TOKEN_NETWORK_FUNCTION_WHITELIST.CLAIM_FROM_CHANNEL))).toBe(true);
     expect(TOKEN_NETWORK_SELECTOR_WHITELIST.has(selector(TOKEN_NETWORK_FUNCTION_WHITELIST.DEPOSIT))).toBe(true);
     expect(TOKEN_NETWORK_SELECTOR_WHITELIST.has(selector(TOKEN_NETWORK_FUNCTION_WHITELIST.CLOSE_CHANNEL))).toBe(true);
     expect(TOKEN_NETWORK_SELECTOR_WHITELIST.has(selector(TOKEN_NETWORK_FUNCTION_WHITELIST.SETTLE_CHANNEL))).toBe(true);
