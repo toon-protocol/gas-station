@@ -291,7 +291,9 @@ This bundle therefore keeps every published port host-IP-prefixed — the
 connector is `127.0.0.1:4000:4000`, and the app publishes nothing at all — so
 the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
-`src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
+`src/deploy-bundle-guard.test.ts` fails CI if that ever regresses. Under the
+shared-edge overlay this moves to `127.0.0.1:4002:4000` — see "Running behind
+the shared edge", below.
 
 ## Running behind the shared edge
 
@@ -341,7 +343,24 @@ overlay itself; the comment at its top has the full accounting. In short, it:
   gas-station measured 28 MB idle, giving `mem_limit`s of 64m and 256m
   respectively (the latter alongside an overlay-level `NODE_OPTIONS` override
   tightening the app's V8 heap cap to 192 MB) — see the overlay file's own
-  comment for the full arithmetic.
+  comment for the full arithmetic;
+- moves the connector's loopback publish to **`127.0.0.1:4002:4000`**
+  (`ports: !override`, so it is the *only* publish once the overlay is on).
+  Every node bundle's own `docker-compose.yml` publishes its connector on
+  `127.0.0.1:4000`, and those collide once several nodes share one host — a
+  real outage (infra#25). The container side stays 4000; only the host side
+  moves, to this node's own assignment:
+
+  | Node | Host loopback port |
+  |---|---|
+  | relay | `127.0.0.1:3000` |
+  | gateway | `127.0.0.1:4001` |
+  | gas-station | `127.0.0.1:4002` |
+  | store | `127.0.0.1:4003` |
+
+  Neither `bootstrap.sh` nor `auto-apply.sh` reads this port from the host —
+  `auto-apply.sh` waits for the connector via `docker inspect`'s own health
+  status, not a host-side curl — so neither needed a change for this.
 
 `bootstrap.sh` and `init-letsencrypt.sh` both skip certificate issuance when
 `COMPOSE_FILE` names `docker-compose.shared-edge.yml` specifically (each greps
