@@ -380,7 +380,7 @@ be asking you to fund.
 [{"chainId":84532,
   "rpcUrl":"https://base-sepolia-rpc.publicnode.com",
   "forwarderAddress":"0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA",
-  "tokenNetworkAddress":"0xe9E05dfecfe165266C88d73e61D483612651952a",
+  "tokenNetworkAddress":"0x1B4606218ceE5Bf02B546e416905F4D3FC8a0249",
   "relayerPrivateKey":"0x…"}]
 ```
 
