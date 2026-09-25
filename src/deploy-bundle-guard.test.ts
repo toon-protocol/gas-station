@@ -42,7 +42,7 @@ const ROUTE_PRICE = 1000;
 const PRIVATE_PORTS = ['3300', '3400'];
 /** Base Sepolia's TokenNetworkRegistry (the 2026-08-28 ADR 0059 cutover's) and the fleet's USDC. */
 const EXPECTED_REGISTRY = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
-const EXPECTED_TOKEN = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
+const EXPECTED_TOKEN = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
 /** ADR 0010: 6-decimal USDC everywhere. */
 const EXPECTED_DECIMALS = 6;
 /** The Solana payment-channel program the connector settles against, and the
