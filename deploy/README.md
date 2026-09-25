@@ -327,8 +327,10 @@ overlay itself; the comment at its top has the full accounting. In short, it:
 - disables `nginx`, `certbot` and `watchtower` (`profiles: [disabled]`, a
   profile nothing ever activates) — no host port 80 or 443 is bound by this
   bundle at all once it is on;
-- joins `connector` and `gas-station` to the external `edge` network (created
-  and owned by infra#24's edge project) under stable aliases, so the edge can
+- joins `connector` and `gas-station` to the external `edge-gas` network
+  (this node's own network, not one shared flat network every node joins --
+  infra#24's edge project creates one per node and Caddy joins all five, so
+  only the edge can reach a given node) under stable aliases, so the edge can
   reach them without depending on this box's own DNS resolution of container
   names;
 - adds a provisional `mem_limit` to every service, sized for a 2 GB host
@@ -347,9 +349,10 @@ what the overlay does.
 ### The alias:port table
 
 Worked out from [`nginx/node.conf.template`](./nginx/node.conf.template),
-which is the map infra#24's edge config is written from:
+which is the map infra#24's edge config is written from. Both aliases live on
+this node's own `edge-gas` network, not a network shared with any other node:
 
-| Hostname | Edge upstream (alias:port) | Container:port today |
+| Hostname | Edge upstream (alias:port, on `edge-gas`) | Container:port today |
 |---|---|---|
 | `proxy.gas.${DOMAIN}` | `gas-proxy:4000` | `connector:4000` |
 | `gas.${DOMAIN}` | `gas-web:3400` | `gas-station:3400` |
@@ -472,7 +475,7 @@ it should prove itself exactly like every later one does.
 |---|---|
 | `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
 | `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, requires the connector to come back healthy, and retries a failed render or apply on every run until it is fixed. |
-| `toon-auto-apply.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
+| `toon-auto-apply-gas.service` / `.timer` | The systemd pair that runs it every five minutes. Named per node -- `-gas` -- because the shared devnet host (infra#25) runs one of these per node, side by side. Install once, below. |
 
 The split is deliberate: the workflow decides **what** to run and proves it
 accepts this node's config first; the box decides **when** to apply, by
@@ -481,11 +484,28 @@ pulling. Nothing outside this box can make this box deploy.
 Install the timer once per box:
 
 ```bash
-sudo cp /root/gas-station/deploy/toon-auto-apply.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply.timer
-systemctl list-timers toon-auto-apply.timer     # when it next fires
-journalctl -u toon-auto-apply.service -n 50     # what it last did
-systemctl start toon-auto-apply.service         # run one now, by hand
+sudo cp /root/gas-station/deploy/toon-auto-apply-gas.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply-gas.timer
+systemctl list-timers toon-auto-apply-gas.timer     # when it next fires
+journalctl -u toon-auto-apply-gas.service -n 50     # what it last did
+systemctl start toon-auto-apply-gas.service         # run one now, by hand
+```
+
+### Migrating an existing box's timer at cutover
+
+A box that already runs the old, un-suffixed `toon-auto-apply.service` /
+`.timer` keeps working exactly as it is -- both units' `ExecStart` points at
+this same `deploy/auto-apply.sh`, which has not moved, so nothing breaks by
+leaving them alone. The rename only matters once a box hosts more than one
+node's bundle side by side (infra#25's cutover onto the shared devnet host),
+where a second node's identically-named `toon-auto-apply.service` would
+collide with this one. Do this once, at that cutover, not before:
+
+```bash
+sudo systemctl disable --now toon-auto-apply.timer
+sudo rm /etc/systemd/system/toon-auto-apply.{service,timer}
+sudo cp /root/gas-station/deploy/toon-auto-apply-gas.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply-gas.timer
 ```
 
 The pin is still the only place a connector build is named here, and it is

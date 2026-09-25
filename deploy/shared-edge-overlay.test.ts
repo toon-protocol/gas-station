@@ -87,13 +87,13 @@ describe('the default bundle, without the overlay', () => {
       expect(service.mem_limit, `${name} should have no mem_limit without the overlay`).toBeUndefined();
     }
 
-    // No `edge` network exists at all without the overlay.
-    expect(base.networks?.edge).toBeUndefined();
+    // No `edge-gas` network exists at all without the overlay.
+    expect(base.networks?.['edge-gas']).toBeUndefined();
     for (const [name, service] of Object.entries(base.services)) {
       expect(
         service.networks ?? {},
         `${name} should not know about an edge network without the overlay`
-      ).not.toHaveProperty('edge');
+      ).not.toHaveProperty('edge-gas');
     }
   });
 });
@@ -126,20 +126,35 @@ describe('the shared-edge overlay, applied the way COMPOSE_FILE turns it on', ()
     }
   });
 
-  maybe()('joins connector and gas-station to the external `edge` network under the contract aliases', () => {
+  maybe()('joins connector and gas-station to the external `edge-gas` network under the contract aliases', () => {
     const merged = composeConfig(files);
 
-    expect(merged.networks?.edge).toMatchObject({ external: true });
+    expect(merged.networks?.['edge-gas']).toMatchObject({ external: true });
 
     // proxy.gas.${DOMAIN} -> connector:4000, under alias gas-proxy.
-    expect(merged.services.connector?.networks?.edge?.aliases).toEqual(['gas-proxy']);
+    expect(merged.services.connector?.networks?.['edge-gas']?.aliases).toEqual(['gas-proxy']);
     // gas.${DOMAIN} -> gas-station:3400, under alias gas-web.
-    expect(merged.services['gas-station']?.networks?.edge?.aliases).toEqual(['gas-web']);
+    expect(merged.services['gas-station']?.networks?.['edge-gas']?.aliases).toEqual(['gas-web']);
 
     // Neither service lost the implicit default network it needs to reach the
     // other one over (the connector proxies to gas-station:3300/3400 there).
     expect(merged.services.connector?.networks).toHaveProperty('default');
     expect(merged.services['gas-station']?.networks).toHaveProperty('default');
+  });
+
+  maybe()('joins ONLY this node\'s own `edge-gas` network, never the flat `edge` name shared-contract v2 retired', () => {
+    // Shared contract v2: one fixed-named network per node (edge-relay,
+    // edge-store, edge-gas, edge-gateway, edge-faucet), not one flat network
+    // every node's containers share -- a flat network let any node reach any
+    // other node's connector /admin or the gateway's handover port.
+    const merged = composeConfig(files);
+    expect(merged.networks?.edge).toBeUndefined();
+    for (const [name, service] of Object.entries(merged.services)) {
+      expect(
+        service.networks ?? {},
+        `${name} must not join the old flat 'edge' network`
+      ).not.toHaveProperty('edge');
+    }
   });
 
   maybe()('never aliases or exposes the job door, :3300, on the edge network', () => {
@@ -149,7 +164,7 @@ describe('the shared-edge overlay, applied the way COMPOSE_FILE turns it on', ()
     // still reached only by the connector, over the compose network -- see
     // README.md "Privacy invariant".
     expect(app?.expose?.map(String)).toContain('3300');
-    expect(app?.networks?.edge?.aliases).not.toContain('gas-station');
+    expect(app?.networks?.['edge-gas']?.aliases).not.toContain('gas-station');
   });
 
   maybe()('gives every service in the bundle a mem_limit, active or disabled', () => {

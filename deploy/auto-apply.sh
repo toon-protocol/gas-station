@@ -30,9 +30,12 @@ REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 DEPLOY_DIR="$REPO_DIR/deploy"
 cd "$REPO_DIR"
 
-# One apply at a time, and never one racing a human. The path is overridable
-# only for tests (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
-LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply.lock}
+# One apply at a time, and never one racing a human. Named per node --
+# TOON_Network#28/infra#25's shared devnet host runs five of these bundles at
+# once, so a shared lock name would serialise unrelated nodes' applies against
+# each other for no reason. The path is overridable only for tests
+# (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
+LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply-gas.lock}
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another apply is already running; leaving it alone"; exit 0; }
 

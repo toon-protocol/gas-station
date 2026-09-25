@@ -24,18 +24,26 @@
 #                                 once. auto-apply.sh already pulls the pinned
 #                                 connector and gas-station images unattended,
 #                                 so losing watchtower here costs nothing.
-#   connector                    joins the external `edge` network under the
-#                                 stable alias `gas-proxy`, so the edge can
-#                                 reach it at `gas-proxy:4000` for
+#   connector                    joins the external `edge-gas` network under
+#                                 the stable alias `gas-proxy`, so the edge
+#                                 can reach it at `gas-proxy:4000` for
 #                                 proxy.gas.${DOMAIN}. Its 127.0.0.1:4000
 #                                 loopback publish from docker-compose.yml is
 #                                 untouched -- bootstrap.sh and auto-apply.sh
 #                                 still read it there.
-#   gas-station                  joins `edge` under the alias `gas-web`, so
-#                                 the edge can reach gas.${DOMAIN} at
+#   gas-station                  joins `edge-gas` under the alias `gas-web`,
+#                                 so the edge can reach gas.${DOMAIN} at
 #                                 `gas-web:3400`. Its job door (:3300) is
 #                                 still never published or aliased anywhere --
 #                                 see README.md "Privacy invariant".
+#
+# `edge-gas` IS THIS NODE'S OWN NETWORK, not a flat network shared by every
+# node on the host (shared contract v2). infra#24's edge project creates one
+# fixed-named network per node (`edge-relay`, `edge-store`, `edge-gas`,
+# `edge-gateway`, `edge-faucet`) and Caddy joins all five; each node's own
+# overlay joins only its own. On one flat network any node could reach any
+# other node's connector `/admin` or the gateway's handover port -- per-node
+# networks mean only the edge itself can reach a node.
 #
 # See deploy/README.md "Running behind the shared edge" for the alias:port
 # table this was worked out from (deploy/nginx/node.conf.template), and for
@@ -45,9 +53,9 @@
 # `networks: default: {}` is repeated on both services below because ADDING
 # an explicit `networks:` key to a service that otherwise gets the implicit
 # default network REPLACES it rather than extending it -- so without this,
-# joining `edge` would silently cut the connector and the app off from each
-# other (the connector proxies to gas-station:3300 over that network). Same
-# pattern as the provider's `docker-compose.hidden.yml`.
+# joining `edge-gas` would silently cut the connector and the app off from
+# each other (the connector proxies to gas-station:3300 over that network).
+# Same pattern as the provider's `docker-compose.hidden.yml`.
 #
 # ── mem_limit ────────────────────────────────────────────────────────────────
 # PROVISIONAL -- replace with docker stats measurements (infra#25 step 2).
@@ -75,14 +83,14 @@ services:
     mem_limit: 128m
     networks:
       default: {}
-      edge:
+      edge-gas:
         aliases: [gas-proxy]
 
   gas-station:
     mem_limit: 320m
     networks:
       default: {}
-      edge:
+      edge-gas:
         aliases: [gas-web]
 
   # `profiles: [disabled]` names a profile nothing ever activates (no
@@ -103,6 +111,8 @@ services:
     profiles: [disabled]
 
 networks:
-  # Created and owned by infra#24's edge project; this node only joins it.
-  edge:
+  # Created and owned by infra#24's edge project, as this node's own network
+  # (one per node, not a flat network shared by every node on the host --
+  # see the comment above). This node only joins it.
+  edge-gas:
     external: true
