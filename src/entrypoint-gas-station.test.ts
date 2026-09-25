@@ -371,7 +371,7 @@ describe('resolveEvmGasStationEnv', () => {
     const chain = config?.chains[0];
     expect(chain?.chainId).toBe(84532);
     expect(chain?.forwarderAddress).toBe('0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA');
-    expect(chain?.tokenNetworkAddress).toBe('0xe9E05dfecfe165266C88d73e61D483612651952a');
+    expect(chain?.tokenNetworkAddress).toBe('0x1B4606218ceE5Bf02B546e416905F4D3FC8a0249');
   });
 
   it('parses several chains — adding one is a config entry, not a code change', () => {
