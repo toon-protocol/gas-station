@@ -358,7 +358,7 @@ describe('resolveEvmGasStationEnv', () => {
     // real-world pair whose EIP-55 checksum is visibly different from the
     // input, so this asserts the normalization actually happened.
     const lowerForwarder = '0x350fcd266f95b1f5b84944e0c7e06c16b837fcaa';
-    const lowerTokenNetwork = '0xe9e05dfecfe165266c88d73e61d483612651952a';
+    const lowerTokenNetwork = '0x1b4606218cee5bf02b546e416905f4d3fc8a0249';
     const config = resolveEvmGasStationEnv({
       EVM_GAS_STATION_CONFIG_JSON: JSON.stringify([
         evmEntry({
