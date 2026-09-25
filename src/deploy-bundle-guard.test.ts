@@ -57,6 +57,9 @@ const nginxTemplate = read('deploy/nginx/node.conf.template');
 const envExample = read('deploy/.env.example');
 const bootstrapScript = read('deploy/bootstrap.sh');
 const letsencryptScript = read('deploy/init-letsencrypt.sh');
+const autoApplyScript = read('deploy/auto-apply.sh');
+const autoApplyUnit = read('deploy/toon-auto-apply-gas.service');
+const autoApplyTimer = read('deploy/toon-auto-apply-gas.timer');
 
 /**
  * The template carries `${OPERATOR_*}` placeholders that are not valid TOML
@@ -486,5 +489,45 @@ describe('bootstrap', () => {
     for (const file of mounted) {
       expect(bootstrapScript, `${file} is mounted but never generated`).toContain(file);
     }
+  });
+});
+
+// ── Per-node auto-apply units (shared contract v2, TOON_Network#28) ─────────
+//
+// The devnet's shared host (infra#25) runs one of these bundles per node,
+// side by side, so a unit or lock name that collided across nodes would mean
+// one node's timer stomping another's. Every name below carries the `-gas`
+// suffix for exactly that reason.
+
+describe('the auto-apply systemd units are named per node', () => {
+  it('are named toon-auto-apply-gas.service / .timer, not the old un-suffixed names', () => {
+    // Reading these by their new path is itself a large part of the guard:
+    // if the rename were ever reverted, `read()` throws and this whole file
+    // fails to even load.
+    expect(autoApplyUnit).toMatch(/^\[Unit\]/m);
+    expect(autoApplyTimer).toMatch(/^\[Timer\]/m);
+    expect(() => read('deploy/toon-auto-apply.service')).toThrow();
+    expect(() => read('deploy/toon-auto-apply.timer')).toThrow();
+  });
+
+  it('the timer points at the renamed service, not the old name', () => {
+    expect(autoApplyTimer).toMatch(/^Unit=toon-auto-apply-gas\.service$/m);
+    expect(autoApplyTimer).not.toContain('toon-auto-apply.service');
+  });
+
+  it('the service runs this bundle\'s own auto-apply.sh', () => {
+    expect(autoApplyUnit).toMatch(/^ExecStart=.*\/deploy\/auto-apply\.sh$/m);
+  });
+
+  it('auto-apply.sh\'s default lock file is per node, not the old shared name', () => {
+    expect(autoApplyScript).toContain('/var/lock/toon-auto-apply-gas.lock');
+    expect(autoApplyScript).not.toContain('/var/lock/toon-auto-apply.lock');
+  });
+
+  it('README documents installing the renamed units and migrating an existing box', () => {
+    const readme = read('deploy/README.md');
+    expect(readme).toContain('toon-auto-apply-gas.service');
+    expect(readme).toContain('toon-auto-apply-gas.timer');
+    expect(readme).toMatch(/^### Migrating an existing box's timer at cutover/m);
   });
 });

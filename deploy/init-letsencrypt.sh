@@ -11,6 +11,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 set -a; . ./.env; set +a
+
+# The shared-edge overlay (docker-compose.shared-edge.yml, TOON_Network#28,
+# infra#24) terminates TLS at the host's shared edge instead of this box's own
+# nginx/certbot, so there is no certificate here for this script to issue --
+# and nginx is not even running to answer the ACME HTTP-01 challenge. Checked
+# before the required-variable guards below, so a shared-edge .env need not
+# fill in LETSENCRYPT_EMAIL just to satisfy a step it will never run.
+if printf '%s' "${COMPOSE_FILE:-}" | grep -q 'docker-compose\.shared-edge\.yml'; then
+  echo "==> COMPOSE_FILE names the shared-edge overlay -- TLS is terminated by"
+  echo "    the host's shared edge (infra#24). Skipping certificate issuance."
+  exit 0
+fi
+
 : "${DOMAIN:?set DOMAIN in .env}"
 : "${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env}"
 

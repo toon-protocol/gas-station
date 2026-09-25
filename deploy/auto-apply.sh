@@ -30,9 +30,12 @@ REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 DEPLOY_DIR="$REPO_DIR/deploy"
 cd "$REPO_DIR"
 
-# One apply at a time, and never one racing a human. The path is overridable
-# only for tests (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
-LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply.lock}
+# One apply at a time, and never one racing a human. Named per node --
+# TOON_Network#28/infra#25's shared devnet host runs five of these bundles at
+# once, so a shared lock name would serialise unrelated nodes' applies against
+# each other for no reason. The path is overridable only for tests
+# (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
+LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply-gas.lock}
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another apply is already running; leaving it alone"; exit 0; }
 
@@ -96,11 +99,26 @@ if [ -x ./render.sh ]; then
   fi
 fi
 
-# The overlay set this box actually runs. Keep in step with README.md. This box
-# runs the base file only; the relay box adds a Watchtower overlay, and this
-# picks that up on its own if the file is ever added here.
-COMPOSE=(-f docker-compose.yml)
-[ -f docker-compose.watchtower.yml ] && COMPOSE+=(-f docker-compose.watchtower.yml)
+# The overlay set this box actually runs is named in deploy/.env, not guessed
+# here -- COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml turns
+# on the shared-edge overlay (TOON_Network#28, infra#24) the same way an
+# operator's own `docker compose ps` in this directory sees it: docker compose
+# reads COMPOSE_FILE out of .env itself. So when .env sets it, this passes NO
+# `-f` flags at all -- an explicit `-f` on the command line would override
+# .env's COMPOSE_FILE and silently run the base file alone, defeating the
+# overlay on every apply. Only a `.env` with no COMPOSE_FILE line falls back
+# to this script's own default, which is the base file plus the (currently
+# unused) Watchtower overlay probe kept here so this box picks that up on its
+# own if the file is ever added. (No `[ -f .env ]` guard here: render.sh,
+# just above, already refuses loudly and exits this script if `.env` is
+# missing, so by this line it is guaranteed to exist.)
+set -a; . ./.env; set +a
+if [ -n "${COMPOSE_FILE:-}" ]; then
+  COMPOSE=()
+else
+  COMPOSE=(-f docker-compose.yml)
+  [ -f docker-compose.watchtower.yml ] && COMPOSE+=(-f docker-compose.watchtower.yml)
+fi
 
 if ! docker compose "${COMPOSE[@]}" pull; then
   echo "FAILED: 'docker compose pull' could not get the images for ${REMOTE:0:7} (its message" >&2
