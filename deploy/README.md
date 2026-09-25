@@ -333,9 +333,15 @@ overlay itself; the comment at its top has the full accounting. In short, it:
   only the edge can reach a given node) under stable aliases, so the edge can
   reach them without depending on this box's own DNS resolution of container
   names;
-- adds a provisional `mem_limit` to every service, sized for a 2 GB host
-  shared five ways — see the overlay file's comment for the arithmetic, and
-  infra#25 step 2 for the real measurement that is supposed to replace it.
+- adds a `mem_limit` to every service, sized from real `docker stats`
+  measurements taken on the shared devnet host itself on 2026-09-25 (infra#25
+  step 2), now that the host is confirmed to be a 1 GB Linode nanode (961 MB
+  total, ~350 MB already used by the OS and Docker) rather than the 2 GB host
+  earlier revisions of this overlay assumed: connector measured 3 MB idle,
+  gas-station measured 28 MB idle, giving `mem_limit`s of 64m and 256m
+  respectively (the latter alongside an overlay-level `NODE_OPTIONS` override
+  tightening the app's V8 heap cap to 192 MB) — see the overlay file's own
+  comment for the full arithmetic.
 
 `bootstrap.sh` and `init-letsencrypt.sh` both skip certificate issuance when
 `COMPOSE_FILE` names `docker-compose.shared-edge.yml` specifically (each greps

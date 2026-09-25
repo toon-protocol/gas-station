@@ -58,36 +58,47 @@
 # Same pattern as the provider's `docker-compose.hidden.yml`.
 #
 # ── mem_limit ────────────────────────────────────────────────────────────────
-# PROVISIONAL -- replace with docker stats measurements (infra#25 step 2).
-# Nobody has measured the shared box yet. These assume a 2 GB host split five
-# ways (relay, store, gas, gateway, faucet), so roughly 400 MB per node in the
-# mean case. This node sits close to that mean rather than above it: README.md
-# "What this box is sized for" already measured it as the lightest of the
-# five containers on its own dedicated nanode (connector 14 MB, app 85 MB, of
-# ~430 MB used in total) and the app's own NODE_OPTIONS already caps its V8
-# heap at 256 MB (docker-compose.yml ~:93) -- 320m leaves ~64 MB of headroom
-# for the non-heap part of a Node process (native modules, buffers, the
-# process itself), which the heap cap alone does not cover. The connector's
-# 128m gives it the same order of headroom above its own 14 MB measurement.
+# Sized from real docker stats measurements taken on the shared devnet host
+# itself on 2026-09-25 (infra#25 step 2), now that the host is confirmed to
+# be a 1 GB Linode nanode (961 MB total, ~350 MB already used by the OS and
+# Docker) rather than the 2 GB host this overlay's numbers used to assume.
 #
-# nginx (measured 4 MB), certbot (17 MB) and watchtower (19 MB) are DISABLED
-# under this overlay (`profiles: [disabled]`, below) and so cost nothing on a
-# box actually running it -- their mem_limit values (32m/32m/64m) are kept
-# close to their own measurements, with the same order of headroom as the two
-# active services, only so a stray `--profile disabled` run or a future
-# re-enable is not left with no limit at all.
+# Idle `docker stats` on that host: connector 3 MB, gas-station app 28 MB.
+#
+# connector: 64m is ~4x its measured 3 MB idle -- plenty of headroom for a
+# lightweight proxy with no heap cap of its own.
+#
+# gas-station: this overlay now also overrides NODE_OPTIONS (in the service's
+# `environment` below) to --max-old-space-size=192, down from the base's 256
+# (docker-compose.yml ~:93), tightening the V8 heap cap to fit the 1 GB host.
+# 256m leaves ~64 MB of headroom above that 192 MB heap cap -- room for the
+# non-heap part of a Node process (native modules, buffers, the process
+# itself), which the heap cap alone does not cover.
+#
+# nginx, certbot and watchtower are DISABLED under this overlay (`profiles:
+# [disabled]`, below) and so cost nothing on a box actually running it --
+# their mem_limit values (32m/32m/64m) are unchanged by this measurement
+# pass, only so a stray `--profile disabled` run or a future re-enable is not
+# left with no limit at all.
 # =============================================================================
 
 services:
   connector:
-    mem_limit: 128m
+    # measured idle 3 MB on 2026-09-25 (infra#25 step 2); limit ≈4x idle
+    mem_limit: 64m
     networks:
       default: {}
       edge-gas:
         aliases: [gas-proxy]
 
   gas-station:
-    mem_limit: 320m
+    # measured idle 28 MB on 2026-09-25 (infra#25 step 2); the overlay's own
+    # NODE_OPTIONS below caps the V8 heap at 192 MB (down from the base's
+    # 256), and 256m leaves the same ~64 MB headroom above that cap for the
+    # non-heap part of the process, on the shared 1 GB nanode host.
+    mem_limit: 256m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=192
     networks:
       default: {}
       edge-gas:
