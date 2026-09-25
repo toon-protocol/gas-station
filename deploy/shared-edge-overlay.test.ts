@@ -21,7 +21,7 @@ const DEPLOY_DIR = dirname(fileURLToPath(import.meta.url));
 
 interface ComposeService {
   image?: string;
-  ports?: { published?: string | number; target?: string | number }[];
+  ports?: { host_ip?: string; published?: string | number; target?: string | number }[];
   expose?: (string | number)[];
   mem_limit?: string | number;
   profiles?: string[];
@@ -178,9 +178,30 @@ describe('the shared-edge overlay, applied the way COMPOSE_FILE turns it on', ()
     }
   });
 
-  maybe()('still keeps the connector reachable on loopback for bootstrap.sh and auto-apply.sh', () => {
+  maybe()('moves the connector off the shared 4000 to its own loopback port, and nothing else', () => {
+    // infra#25: every node bundle's docker-compose.yml publishes its
+    // connector on 127.0.0.1:4000, which collides once several share a host.
+    // `ports: !override` must leave 4002 as the connector's ONLY publish
+    // under the overlay; the container side stays 4000.
     const merged = composeConfig(files);
-    const connectorPorts = merged.services.connector?.ports ?? [];
-    expect(connectorPorts.map((p) => String(p.published))).toContain('4000');
+    const connectorPorts = (merged.services.connector?.ports ?? []).map((p) => ({
+      host_ip: p.host_ip,
+      published: String(p.published),
+      target: String(p.target),
+    }));
+    expect(connectorPorts).toEqual([{ host_ip: '127.0.0.1', published: '4002', target: '4000' }]);
+  });
+});
+
+describe('without the overlay, the connector loopback publish is unchanged', () => {
+  it('is still exactly 127.0.0.1:4000:4000', () => {
+    if (!dockerAvailable) return;
+    const base = composeConfig(['docker-compose.yml']);
+    const connectorPorts = (base.services.connector?.ports ?? []).map((p) => ({
+      host_ip: p.host_ip,
+      published: String(p.published),
+      target: String(p.target),
+    }));
+    expect(connectorPorts).toEqual([{ host_ip: '127.0.0.1', published: '4000', target: '4000' }]);
   });
 });
