@@ -36,6 +36,7 @@ updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
 | `bootstrap.sh` | Fresh-host install: firewall, swap, docker, keys, render, start, TLS. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
+| `docker-compose.shared-edge.yml` | The shared-edge overlay (off by default). See "Running behind the shared edge", below. |
 
 `.env`, the rendered `connector.toml`, `operator-bearer.token`,
 `operator-write.keys`, `nginx/conf.d/` and all key material are gitignored.
@@ -291,6 +292,112 @@ connector is `127.0.0.1:4000:4000`, and the app publishes nothing at all — so
 the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
+
+## Running behind the shared edge
+
+The devnet is moving onto one Linode, shared by the relay, store, gas
+station, workload gateway and faucet nodes, behind one shared Caddy edge that
+owns ports 80 and 443 (infra#24, infra ADR 0001, infra#25). This node keeps
+its own connector, keys and hostnames — only its own nginx, certbot and
+Watchtower go away, and the edge reaches its containers directly over an
+external Docker network instead of over this box's own port 80/443.
+
+**The overlay is off by default.** Nothing here changes what a plain
+`docker compose up -d` does until you opt in, which is what lets this merge
+while the box is still standing on its own Linode.
+
+### Turning it on
+
+One line, the way the provider's Hidden overlay works:
+
+```bash
+# in .env
+COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
+```
+
+`docker compose` reads `COMPOSE_FILE` out of `.env` itself, so every command
+run in this directory — `bootstrap.sh`, `auto-apply.sh`, `render.sh`'s own
+`docker compose restart connector`, and an operator's own `docker compose ps`
+— all see the merged stack without needing a `-f` flag anywhere. Leaving the
+line out of `.env` runs `docker-compose.yml` alone, exactly as today.
+
+[`docker-compose.shared-edge.yml`](./docker-compose.shared-edge.yml) is the
+overlay itself; the comment at its top has the full accounting. In short, it:
+
+- disables `nginx`, `certbot` and `watchtower` (`profiles: [disabled]`, a
+  profile nothing ever activates) — no host port 80 or 443 is bound by this
+  bundle at all once it is on;
+- joins `connector` and `gas-station` to the external `edge` network (created
+  and owned by infra#24's edge project) under stable aliases, so the edge can
+  reach them without depending on this box's own DNS resolution of container
+  names;
+- adds a provisional `mem_limit` to every service, sized for a 2 GB host
+  shared five ways — see the overlay file's comment for the arithmetic, and
+  infra#25 step 2 for the real measurement that is supposed to replace it.
+
+`bootstrap.sh` and `init-letsencrypt.sh` both skip certificate issuance when
+`COMPOSE_FILE` names `docker-compose.shared-edge.yml` specifically (each greps
+`.env`'s `COMPOSE_FILE` for that filename) — there is no certificate for this
+box to hold any more, and nginx is not running to answer the ACME HTTP-01
+challenge even if there were. `auto-apply.sh` makes a looser check of the same
+variable — any `COMPOSE_FILE` at all, not that specific name — because its
+job is only to stop overriding whatever `.env` already chose, not to know
+what the overlay does.
+
+### The alias:port table
+
+Worked out from [`nginx/node.conf.template`](./nginx/node.conf.template),
+which is the map infra#24's edge config is written from:
+
+| Hostname | Edge upstream (alias:port) | Container:port today |
+|---|---|---|
+| `proxy.gas.${DOMAIN}` | `gas-proxy:4000` | `connector:4000` |
+| `gas.${DOMAIN}` | `gas-web:3400` | `gas-station:3400` |
+
+Neither alias is `gas-station`'s job port, `:3300` — that door is never
+published or aliased anywhere, on or off the overlay. See "Privacy
+invariant", above.
+
+### What nginx does beyond plain proxying
+
+The edge has to replicate all of this, not just the routing table above —
+everything here is in `nginx/node.conf.template`:
+
+- **Rate limiting.** `limit_req_zone $binary_remote_addr zone=gas:10m
+  rate=200r/s;`, applied to both hostnames with `burst=400 nodelay`.
+- **CORS on `/ilp/identity` only.** `Access-Control-Allow-Origin:
+  https://proxy.${DOMAIN}` and `Vary: Origin`, so a browser-based client can
+  read this node's signer pubkey cross-origin from the relay's own domain.
+  Every other path carries no CORS header.
+- **`X-Forwarded-Proto: https`** and **`X-Forwarded-For`** on every proxied
+  request — the app and the connector are not told about TLS any other way.
+- **WebSocket upgrade carriage** (`Upgrade`/`Connection`, `map $http_upgrade
+  $connection_upgrade`) on the general `location /` block, for the
+  connector's BTP endpoint (`wss://proxy.gas.${DOMAIN}/ilp/btp`) the relay
+  peers over.
+- **Re-resolving the upstream address at runtime, not once at startup.**
+  `resolver 127.0.0.11 valid=10s ipv6=off;` plus `set $upstream connector;
+  proxy_pass http://$upstream:4000;` (a *variable* upstream) is load-bearing,
+  per the template's own comment: nginx resolves a literal hostname once, at
+  config-parse time, so when `auto-apply.sh` or Watchtower recreates a
+  container at a new address a literal upstream 502s until nginx is reloaded.
+  Going through a variable forces a fresh Docker-DNS lookup every 10s instead.
+  The edge needs the same property against its own `gas-proxy`/`gas-web`
+  aliases — those aliases are stable, but the address behind them still moves
+  on every recreate, `auto-apply.sh`'s included (Watchtower itself is disabled
+  under the overlay, but nothing else is).
+- **`proxy_read_timeout 1h`** on the general block, longer than nginx's
+  default 60s, so a long-lived BTP connection is not cut.
+- **`client_max_body_size 512k`** on the general block — a wire transaction
+  or a forward request is kilobytes; nothing legitimate here is a blob store.
+- **`location ^~ /admin { return 404; }`** — blocked outright, ahead of the
+  general proxy block, regardless of which host it is on.
+- **404 for any other host.** The `map $host $backend` table answers empty
+  for anything but the two names above, and the general block returns 404
+  rather than proxying a request whose Host header does not match.
+- **HTTP→HTTPS redirect on port 80**, except for the ACME challenge path —
+  moot under the overlay, since nginx is not running to serve port 80 at all;
+  the edge terminates TLS instead.
 
 ## Following connector releases
 

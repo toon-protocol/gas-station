@@ -329,3 +329,45 @@ describe('a box with no deploy/.applied at all', () => {
     ).toMatch(/ps -q connector/);
   });
 });
+
+describe('COMPOSE_FILE in .env decides which compose files auto-apply.sh runs (TOON_Network#28, infra#24)', () => {
+  it('passes no -f flags when .env sets COMPOSE_FILE, so docker compose reads it from .env itself', () => {
+    // An explicit `-f` on the command line overrides COMPOSE_FILE from .env,
+    // which would silently run the base file alone on every timer tick and
+    // defeat the shared-edge overlay forever -- this is the regression this
+    // guards against.
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, {
+      ...ENV,
+      COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml',
+    });
+
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    // Every `docker compose <subcommand>` call the stub recorded, with no
+    // `-f <file>` in front of the subcommand. (A loose `.not.toContain('-f')`
+    // would false-positive on `inspect --format`, which contains the same two
+    // characters.)
+    const composeCalls = result.calls
+      .split('\n')
+      .filter((line) => line.startsWith('compose '));
+    expect(composeCalls.length).toBeGreaterThan(0);
+    for (const line of composeCalls) {
+      expect(
+        line,
+        `auto-apply.sh must not pass its own -f when .env sets COMPOSE_FILE:\n${result.calls}`
+      ).not.toMatch(/^compose -f\b/);
+    }
+  });
+
+  it('falls back to -f docker-compose.yml when .env sets no COMPOSE_FILE', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls).toContain('-f docker-compose.yml');
+  });
+});

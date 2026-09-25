@@ -12,6 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 [ -f .env ] || { echo "Missing .env — copy .env.example and fill it in." >&2; exit 1; }
+set -a; . ./.env; set +a
 
 echo "==> [1/7] Firewall"
 # Only SSH, HTTP (for ACME) and HTTPS. Note that docker publishes ports by
@@ -96,9 +97,18 @@ echo "==> [7/7] Pull and start"
 docker compose pull --ignore-pull-failures
 docker compose up -d
 
-./init-letsencrypt.sh
+# The shared-edge overlay (docker-compose.shared-edge.yml, TOON_Network#28,
+# infra#24) terminates TLS at the host's shared edge instead of this box's own
+# nginx/certbot -- init-letsencrypt.sh detects this itself and would no-op,
+# but skip the call outright so the step reads as skipped, not as "did
+# nothing" in the log.
+if printf '%s' "${COMPOSE_FILE:-}" | grep -q 'docker-compose\.shared-edge\.yml'; then
+  echo "==> COMPOSE_FILE names the shared-edge overlay -- TLS is terminated by"
+  echo "    the host's shared edge (infra#24). Skipping certificate issuance."
+else
+  ./init-letsencrypt.sh
+fi
 
-set -a; . ./.env; set +a
 echo
 echo "gas-station box up."
 echo "  paid ILP edge : https://proxy.gas.${DOMAIN}/ilp"

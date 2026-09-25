@@ -1,0 +1,108 @@
+# =============================================================================
+# The shared-edge overlay (infra#24, infra ADR 0001, TOON_Network#28)
+# =============================================================================
+# The devnet is moving onto one Linode, shared by the relay, store, gas
+# station, workload gateway and faucet nodes, behind one shared Caddy edge
+# that owns ports 80 and 443. This node keeps its own connector, keys and
+# hostnames -- only its own TLS front goes away.
+#
+# Turned on the way the provider's HIDDEN overlay is: one line in .env --
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
+#
+# docker compose reads COMPOSE_FILE from .env itself, so every `docker
+# compose` command run in this directory -- auto-apply.sh's included -- sees
+# the merged stack. A `.env` with no COMPOSE_FILE line runs docker-compose.yml
+# alone, exactly as before this file existed.
+#
+# What it does:
+#
+#   nginx, certbot, watchtower   DISABLED (`profiles: [disabled]` -- a
+#                                 profile nothing ever activates). No public
+#                                 port 80 or 443 is bound by this bundle at
+#                                 all; the shared edge owns both, on the host,
+#                                 once. auto-apply.sh already pulls the pinned
+#                                 connector and gas-station images unattended,
+#                                 so losing watchtower here costs nothing.
+#   connector                    joins the external `edge` network under the
+#                                 stable alias `gas-proxy`, so the edge can
+#                                 reach it at `gas-proxy:4000` for
+#                                 proxy.gas.${DOMAIN}. Its 127.0.0.1:4000
+#                                 loopback publish from docker-compose.yml is
+#                                 untouched -- bootstrap.sh and auto-apply.sh
+#                                 still read it there.
+#   gas-station                  joins `edge` under the alias `gas-web`, so
+#                                 the edge can reach gas.${DOMAIN} at
+#                                 `gas-web:3400`. Its job door (:3300) is
+#                                 still never published or aliased anywhere --
+#                                 see README.md "Privacy invariant".
+#
+# See deploy/README.md "Running behind the shared edge" for the alias:port
+# table this was worked out from (deploy/nginx/node.conf.template), and for
+# everything nginx does today that the edge has to replicate -- the rate
+# limit and the CORS header on /ilp/identity matter most.
+#
+# `networks: default: {}` is repeated on both services below because ADDING
+# an explicit `networks:` key to a service that otherwise gets the implicit
+# default network REPLACES it rather than extending it -- so without this,
+# joining `edge` would silently cut the connector and the app off from each
+# other (the connector proxies to gas-station:3300 over that network). Same
+# pattern as the provider's `docker-compose.hidden.yml`.
+#
+# ── mem_limit ────────────────────────────────────────────────────────────────
+# PROVISIONAL -- replace with docker stats measurements (infra#25 step 2).
+# Nobody has measured the shared box yet. These assume a 2 GB host split five
+# ways (relay, store, gas, gateway, faucet), so roughly 400 MB per node in the
+# mean case. This node sits close to that mean rather than above it: README.md
+# "What this box is sized for" already measured it as the lightest of the
+# five containers on its own dedicated nanode (connector 14 MB, app 85 MB, of
+# ~430 MB used in total) and the app's own NODE_OPTIONS already caps its V8
+# heap at 256 MB (docker-compose.yml ~:93) -- 320m leaves ~64 MB of headroom
+# for the non-heap part of a Node process (native modules, buffers, the
+# process itself), which the heap cap alone does not cover. The connector's
+# 128m gives it the same order of headroom above its own 14 MB measurement.
+#
+# nginx (measured 4 MB), certbot (17 MB) and watchtower (19 MB) are DISABLED
+# under this overlay (`profiles: [disabled]`, below) and so cost nothing on a
+# box actually running it -- their mem_limit values (32m/32m/64m) are kept
+# close to their own measurements, with the same order of headroom as the two
+# active services, only so a stray `--profile disabled` run or a future
+# re-enable is not left with no limit at all.
+# =============================================================================
+
+services:
+  connector:
+    mem_limit: 128m
+    networks:
+      default: {}
+      edge:
+        aliases: [gas-proxy]
+
+  gas-station:
+    mem_limit: 320m
+    networks:
+      default: {}
+      edge:
+        aliases: [gas-web]
+
+  # `profiles: [disabled]` names a profile nothing ever activates (no
+  # COMPOSE_PROFILES, no `--profile` flag anywhere in this repo), which is how
+  # a compose overlay switches a service off: `docker compose up -d` (and
+  # `config`, with no profile given) skips it entirely, rather than starting
+  # it and leaving it unused.
+  nginx:
+    mem_limit: 32m
+    profiles: [disabled]
+
+  certbot:
+    mem_limit: 32m
+    profiles: [disabled]
+
+  watchtower:
+    mem_limit: 64m
+    profiles: [disabled]
+
+networks:
+  # Created and owned by infra#24's edge project; this node only joins it.
+  edge:
+    external: true
