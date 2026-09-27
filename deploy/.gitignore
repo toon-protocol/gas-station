@@ -10,3 +10,7 @@ operator-write.keys
 nginx/conf.d/
 *.key
 *.secret
+
+# The fingerprint of the inputs the running connector last started on
+# (toon-protocol/relay#173); auto-apply.sh restarts it when they change.
+.connector-inputs

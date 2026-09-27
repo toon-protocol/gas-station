@@ -164,15 +164,32 @@ if [ "\${1:-}" = compose ]; then
   if [ "\${1:-}" = -f ]; then shift 2; fi
   rest="$*"
   case "$rest" in
-    "ps -q "*) svc=\${rest#ps -q }; echo "cid-$svc"; exit 0 ;;
+    "ps -q "*)
+      svc=\${rest#ps -q }
+      # STUB_RECREATE=1: \`up -d\` replaces the container (an image bump), so
+      # the id before it and the id after it differ.
+      if [ "\${STUB_RECREATE:-0}" = 1 ] && [ -e "$STUB_LOG.up" ]; then
+        echo "cid-$svc-recreated"
+      else
+        echo "cid-$svc"
+      fi
+      exit 0 ;;
     "pull") exit "\${STUB_PULL_EXIT:-0}" ;;
-    "up -d") exit "\${STUB_UP_EXIT:-0}" ;;
+    "up -d") touch "$STUB_LOG.up"; exit "\${STUB_UP_EXIT:-0}" ;;
+    "restart connector") touch "$STUB_LOG.restarted"; exit 0 ;;
     "logs --tail 40 "*) exit 0 ;;
   esac
   echo "stub docker: unexpected compose call: $rest" >&2
   exit 97
 fi
-if [ "\${1:-}" = inspect ]; then echo "\${STUB_HEALTH:-healthy}"; exit 0; fi
+if [ "\${1:-}" = inspect ]; then
+  if [ -e "$STUB_LOG.restarted" ]; then
+    echo "\${STUB_HEALTH_AFTER_RESTART:-\${STUB_HEALTH:-healthy}}"
+  else
+    echo "\${STUB_HEALTH:-healthy}"
+  fi
+  exit 0
+fi
 echo "stub docker: unexpected call: $*" >&2
 exit 97
 `;
@@ -182,6 +199,10 @@ beforeAll(() => {
   stubBin = tmp('gas-station-stub-bin-');
   writeFileSync(join(stubBin, 'docker'), DOCKER_STUB);
   chmodSync(join(stubBin, 'docker'), 0o755);
+  // The health wait sleeps 3s between 40 polls; a connector the stub keeps
+  // unhealthy would hold a test for two minutes.
+  writeFileSync(join(stubBin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(join(stubBin, 'sleep'), 0o755);
 });
 
 interface Run {
@@ -192,11 +213,15 @@ interface Run {
 }
 
 let runs = 0;
-function autoApply(boxDir: string): Run {
+function autoApply(
+  boxDir: string,
+  stubEnv: Record<string, string> = {}
+): Run {
   const log = join(boxDir, `stub-log-${runs++}`);
   writeFileSync(log, '');
   const env = {
     ...process.env,
+    ...stubEnv,
     PATH: `${stubBin}:${process.env.PATH}`,
     STUB_LOG: log,
     TOON_AUTOAPPLY_LOCK: join(boxDir, '.autoapply.lock'),
@@ -369,5 +394,133 @@ describe('COMPOSE_FILE in .env decides which compose files auto-apply.sh runs (T
     const result = autoApply(box);
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls).toContain('-f docker-compose.yml');
+  });
+});
+
+// connector.toml, the keys and the operator files are BIND-MOUNTED into the
+// connector, and `up -d` recreates a container on a changed image or service
+// definition, never on changed bytes behind a bind mount. So a merge that
+// changed only the rendered config used to be "applied; connector healthy"
+// while the connector went on serving the config it had last started with
+// (toon-protocol/relay#173, where the relay's did exactly that twice).
+// deploy/.connector-inputs (gitignored) records the fingerprint of the inputs
+// the running connector was last started on and seen healthy with.
+function connectorInputs(boxDir: string): string | null {
+  try {
+    return readFileSync(
+      join(boxDir, 'deploy', '.connector-inputs'),
+      'utf8'
+    ).trim();
+  } catch {
+    return null;
+  }
+}
+
+function changeConnectorTemplate(originDir: string): string {
+  const path = join(originDir, 'deploy', 'connector.toml.template');
+  writeFileSync(path, `${readFileSync(path, 'utf8')}\n# changed\n`);
+  return commitAll(originDir, 'connector.toml.template changes, and nothing else');
+}
+
+function restarted(run: Run): boolean {
+  return /^compose (-f \S+ )*restart connector$/m.test(run.calls);
+}
+
+describe('a merge that changes only the connector config (toon-protocol/relay#173)', () => {
+  it('restarts the connector, so the merged config is the one it serves', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+    expect(autoApply(box).status).toBe(0);
+    const before = connectorInputs(box);
+    expect(before, 'a healthy apply records what the connector runs on').not.toBeNull();
+
+    const sha = changeConnectorTemplate(origin.dir);
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(restarted(result), `no restart:\n${result.calls}`).toBe(true);
+    expect(result.stdout).toMatch(/restarting it/);
+    expect(applied(box)).toBe(sha);
+    expect(connectorInputs(box)).not.toBe(before);
+  });
+
+  it('does not restart it when a re-apply renders the inputs it already runs on', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+    expect(autoApply(box).status).toBe(0);
+
+    // A lost .applied makes the next run a full re-apply of the same commit.
+    rmSync(join(box, 'deploy', '.applied'));
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls, 'it did run the apply').toMatch(/up -d/);
+    expect(restarted(result), 'nothing changed, so nothing to restart').toBe(false);
+  });
+
+  it('restarts it once on a box that has no record yet, the safer reading', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(restarted(result)).toBe(true);
+    expect(connectorInputs(box)).not.toBeNull();
+  });
+
+  it('re-renders and restarts it on the next timer run when .env is changed by hand, with nothing merged', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+    expect(autoApply(box).status).toBe(0);
+    const before = connectorInputs(box);
+
+    // A rotated operator key: .env is gitignored, so this never arrives in a
+    // merge, and render.sh is what turns it into operator-write.keys.
+    writeEnv(box, {
+      ...ENV,
+      OPERATOR_WRITE_KEY:
+        '4444444444444444444444444444444444444444444444444444444444444444',
+    });
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(restarted(result), `no restart:\n${result.calls}`).toBe(true);
+    expect(
+      readFileSync(join(box, 'deploy', 'operator-write.keys'), 'utf8')
+    ).toContain('4444');
+    expect(connectorInputs(box)).not.toBe(before);
+
+    const quiet = autoApply(box);
+    expect(quiet.calls, 'once loaded, the box is quiet again').toBe('');
+  });
+
+  it('restarts it even when `up -d` recreated the container, rather than trust an id read before it', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+    expect(autoApply(box).status).toBe(0);
+
+    const sha = changeConnectorTemplate(origin.dir);
+    const result = autoApply(box, { STUB_RECREATE: '1' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(restarted(result)).toBe(true);
+    expect(applied(box)).toBe(sha);
+  });
+
+  it('fails, and records nothing, when the restarted connector does not come back healthy', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+    expect(autoApply(box).status).toBe(0);
+    const before = connectorInputs(box);
+
+    changeConnectorTemplate(origin.dir);
+    const result = autoApply(box, { STUB_HEALTH_AFTER_RESTART: 'unhealthy' });
+    expect(result.status, 'a connector that refuses the new config fails the run').not.toBe(0);
+    expect(restarted(result)).toBe(true);
+    expect(result.stdout).toMatch(/FAILED: the connector is 'unhealthy'/);
+    expect(applied(box), 'so the next run retries it').toBe(origin.sha);
+    expect(connectorInputs(box)).toBe(before);
   });
 });
