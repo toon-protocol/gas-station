@@ -23,7 +23,11 @@
 #   * a render or apply failure is retried, and reported, on every run until
 #     it is fixed -- never silently sat on with the box left on the new
 #     commit and the old config (TOON_Network#164, porting TOON_Network#160;
-#     see `deploy/.applied`, below the fetch, for how).
+#     see `deploy/.applied`, below the fetch, for how);
+#   * a change to anything the connector mounts, or to the .env it is rendered
+#     from, restarts it, merged or edited on the box, since `up -d` never
+#     notices bytes behind a bind mount (toon-protocol/relay#173; see
+#     `deploy/.connector-inputs`).
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -34,10 +38,14 @@ cd "$REPO_DIR"
 # a change to ANY of them only takes effect when the connector restarts --
 # connector.toml most often, but a rotated operator-write.keys that stayed
 # authorised would be the same bug on a security-relevant file. The same list
-# as store's auto-apply.sh (store#129). A missing file is tolerated and counts
-# as a change once it appears.
+# as store's auto-apply.sh (store#129), plus .env: render.sh writes
+# connector.toml and both operator files from it, so an operator rotating a
+# key edits .env, and that has to count as a change before anything is
+# re-rendered. A missing file is tolerated and counts as a change once it
+# appears.
 fingerprint_connector_inputs() {
   { sha256sum \
+      .env \
       connector.toml \
       operator-bearer.token \
       operator-write.keys \
@@ -88,11 +96,21 @@ REMOTE=$(git rev-parse origin/main)
 APPLIED_FILE="$DEPLOY_DIR/.applied"
 APPLIED=$(cat "$APPLIED_FILE" 2>/dev/null || true)
 
-if [ "$LOCAL" = "$REMOTE" ] && [ "$LOCAL" = "$APPLIED" ]; then
-  exit 0   # nothing merged since last time, and it is already applied
-fi
+# deploy/.connector-inputs: the fingerprint of the inputs the running
+# connector last started on and came back healthy with (toon-protocol/relay#173;
+# see the activation step below). Checked here as well as there, so an .env or
+# key edited by hand on the box -- gitignored, so it never dirties the tree and
+# never arrives in a merge -- is rendered and loaded on the next timer run
+# instead of waiting for the next commit.
+INPUTS_FILE="$DEPLOY_DIR/.connector-inputs"
+INPUTS_RUNNING=$(cat "$INPUTS_FILE" 2>/dev/null || true)
 
-if [ "$LOCAL" != "$REMOTE" ]; then
+if [ "$LOCAL" = "$REMOTE" ] && [ "$LOCAL" = "$APPLIED" ]; then
+  if [ "$(cd "$DEPLOY_DIR" && fingerprint_connector_inputs)" = "$INPUTS_RUNNING" ]; then
+    exit 0   # nothing merged since last time, it is applied, and the connector runs on what is on disk
+  fi
+  echo "the connector's inputs changed on the box; re-applying ${LOCAL:0:7} to load them"
+elif [ "$LOCAL" != "$REMOTE" ]; then
   echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7}"
   git merge --ff-only origin/main
 else
@@ -137,11 +155,6 @@ else
   [ -f docker-compose.watchtower.yml ] && COMPOSE+=(-f docker-compose.watchtower.yml)
 fi
 
-# Captured before `up -d` so a recreation (an image bump, a changed service
-# definition) is distinguishable below: a recreated connector has already
-# booted on the files now on disk and must not be bounced again for them.
-CONNECTOR_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q connector || true)
-
 if ! docker compose "${COMPOSE[@]}" pull; then
   echo "FAILED: 'docker compose pull' could not get the images for ${REMOTE:0:7} (its message" >&2
   echo "is above). deploy/.applied is left naming the last commit that DID apply, so this is" >&2
@@ -176,22 +189,26 @@ wait_connector_healthy || exit 1
 # container on a changed image or service definition, never on changed bytes
 # behind a bind mount, so a merge that changed only the rendered config used
 # to be applied and reported healthy while the connector went on serving the
-# config it had last started with. Comparing the files before and after
-# render.sh is not enough: a retried apply has already rendered, so its disk
-# matches itself. Instead deploy/.connector-inputs records the fingerprint of
-# the inputs the running connector was last started on and seen healthy
-# with, and this run compares the disk to THAT. A missing record reads as
-# changed -- the safer reading, as with .applied -- which costs one restart on
-# a box's first run under this check.
+# config it had last started with (#35's channel_index_from_block did, on the
+# devnet). Comparing the files before and after render.sh is not enough: a
+# retried apply has already rendered, so its disk matches itself. Instead this
+# compares the disk to deploy/.connector-inputs, the record of what the
+# running connector was last started on. A missing record reads as changed --
+# the safer reading, as with .applied -- which costs one restart on a box's
+# first run under this check.
+#
+# It restarts even when `up -d` has just recreated the container, which
+# already booted on these files. Telling the two apart means trusting a
+# container id read before `up -d`, and one misread there would record the new
+# fingerprint without ever loading it -- a stale connector nothing would ever
+# correct. A second start in the rare merge that bumps the image AND changes
+# the config is the cheaper failure.
 #
 # Healthy after a restart is proof enough that the new config is live: the
 # connector refuses to start on a config it cannot load or a backend it cannot
 # reach, so there is no degraded run on the old file to mistake for success.
-INPUTS_FILE="$DEPLOY_DIR/.connector-inputs"
 INPUTS_NOW=$(fingerprint_connector_inputs)
-INPUTS_RUNNING=$(cat "$INPUTS_FILE" 2>/dev/null || true)
-CONNECTOR_AFTER_UP=$(docker compose "${COMPOSE[@]}" ps -q connector)
-if [ "$INPUTS_NOW" != "$INPUTS_RUNNING" ] && [ "$CONNECTOR_AFTER_UP" = "$CONNECTOR_BEFORE_UP" ]; then
+if [ "$INPUTS_NOW" != "$INPUTS_RUNNING" ]; then
   echo "the connector's mounted inputs changed since it last started; restarting it to load them"
   # The connector and ONLY it: nothing else changed, and the gas station and
   # the TLS front must not blip for a connector config change.

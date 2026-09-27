@@ -469,7 +469,33 @@ describe('a merge that changes only the connector config (toon-protocol/relay#17
     expect(connectorInputs(box)).not.toBeNull();
   });
 
-  it('does not bounce a connector `up -d` just recreated, which booted on the new files', () => {
+  it('re-renders and restarts it on the next timer run when .env is changed by hand, with nothing merged', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+    expect(autoApply(box).status).toBe(0);
+    const before = connectorInputs(box);
+
+    // A rotated operator key: .env is gitignored, so this never arrives in a
+    // merge, and render.sh is what turns it into operator-write.keys.
+    writeEnv(box, {
+      ...ENV,
+      OPERATOR_WRITE_KEY:
+        '4444444444444444444444444444444444444444444444444444444444444444',
+    });
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(restarted(result), `no restart:\n${result.calls}`).toBe(true);
+    expect(
+      readFileSync(join(box, 'deploy', 'operator-write.keys'), 'utf8')
+    ).toContain('4444');
+    expect(connectorInputs(box)).not.toBe(before);
+
+    const quiet = autoApply(box);
+    expect(quiet.calls, 'once loaded, the box is quiet again').toBe('');
+  });
+
+  it('restarts it even when `up -d` recreated the container, rather than trust an id read before it', () => {
     const origin = freshOrigin();
     const box = cloneBox(origin.dir);
     writeEnv(box, ENV);
@@ -478,7 +504,7 @@ describe('a merge that changes only the connector config (toon-protocol/relay#17
     const sha = changeConnectorTemplate(origin.dir);
     const result = autoApply(box, { STUB_RECREATE: '1' });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(restarted(result)).toBe(false);
+    expect(restarted(result)).toBe(true);
     expect(applied(box)).toBe(sha);
   });
 
