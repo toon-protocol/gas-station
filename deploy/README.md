@@ -496,10 +496,26 @@ a missing file this way, rather than having `bootstrap.sh` write it, is the
 safer of the two: the box's first-ever apply IS this script's first run, and
 it should prove itself exactly like every later one does.
 
+**A merged config change restarts the connector (toon-protocol/relay#173).**
+`connector.toml`, the keys and the operator files are bind-mounted, and
+`up -d` recreates a container only for a changed image or service definition,
+never for changed bytes behind a bind mount. So a config-only merge used to be
+"applied; connector healthy" while the connector went on serving the config
+it had started with. `deploy/.connector-inputs` (gitignored) now holds a
+fingerprint of every file the connector mounts, as they were when it last
+started and came back healthy. After `up -d`, `auto-apply.sh` compares the
+freshly rendered files to that record and, when they differ, restarts the
+connector alone and waits for it to be healthy again. It skips the restart when
+`up -d` has just recreated the container, and a missing record counts as a
+change, so a box's first run under this check restarts the connector once.
+This runs only when there is a commit to apply: an edit to `.env` alone is
+picked up at the next merge, or by running `./render.sh` and
+`docker compose restart connector` by hand.
+
 | File | What it is |
 |---|---|
 | `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
-| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, requires the connector to come back healthy, and retries a failed render or apply on every run until it is fixed. |
+| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, restarts the connector when its mounted config changed, requires it to come back healthy, and retries a failed render or apply on every run until it is fixed. |
 | `toon-auto-apply-gas.service` / `.timer` | The systemd pair that runs it every five minutes. Named per node -- `-gas` -- because the shared devnet host (infra#25) runs one of these per node, side by side. Install once, below. |
 
 The split is deliberate: the workflow decides **what** to run and proves it
