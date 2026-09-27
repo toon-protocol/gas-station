@@ -45,6 +45,14 @@ const EXPECTED_REGISTRY = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
 const EXPECTED_TOKEN = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
 /** ADR 0010: 6-decimal USDC everywhere. */
 const EXPECTED_DECIMALS = 6;
+/** TOON_Network#182: the local channel index (connector issue #661)
+ *  backfills from here on a cold start with no checkpoint, rather than from
+ *  genesis against a public RPC that prunes history. The deploy block of the
+ *  EXPECTED_REGISTRY/EXPECTED_TOKEN TokenNetwork above -- the
+ *  createTokenNetwork transaction recorded in connector
+ *  packages/contracts/deployments/base-sepolia.md's 2026-09-25 USDC
+ *  cutover. */
+const EXPECTED_CHANNEL_INDEX_FROM_BLOCK = 47285026;
 /** The Solana payment-channel program the connector settles against, and the
  *  mint the fleet settles in — the one the faucet can still mint (its
  *  predecessor's mint authority is lost; connector's devnet-public.md). */
@@ -73,7 +81,12 @@ interface ConnectorConfig {
   node: { addresses: string[]; http_endpoint: string; btp_endpoint: string };
   routes: { prefix: string; handler_url: string; price: number }[];
   settlement: {
-    evm: { contract_address: string; token_address: string; decimals: number };
+    evm: {
+      contract_address: string;
+      token_address: string;
+      decimals: number;
+      channel_index_from_block: number;
+    };
   };
   operator: { bearer_token_file: string; write_keys_file: string };
 }
@@ -177,6 +190,9 @@ describe('settlement', () => {
     expect(connector.settlement.evm.contract_address).toBe(EXPECTED_REGISTRY);
     expect(connector.settlement.evm.token_address).toBe(EXPECTED_TOKEN);
     expect(connector.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
+    expect(connector.settlement.evm.channel_index_from_block).toBe(
+      EXPECTED_CHANNEL_INDEX_FROM_BLOCK
+    );
   });
 
   it('keeps the Solana table out of the template, where render.sh appends it', () => {
