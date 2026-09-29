@@ -32,7 +32,7 @@ const ROUTE_PREFIX = 'g.toon.gas';
 const QUOTE_ROUTE_PREFIX = 'g.toon.gas.quote';
 const RELAY_ROUTE_PREFIX = 'g.toon.relay.gas';
 /** The one immutable connector build this bundle runs. Bump here and in docker-compose.yml together. */
-const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
+const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.29.1';
 /** Where the connector delivers a paid job. The `/gas` path is load-bearing. */
 const EXECUTE_HANDLER_URL = 'http://gas-station:3300/gas/execute';
 const QUOTE_HANDLER_URL = 'http://gas-station:3300/gas/quote';
@@ -87,6 +87,8 @@ interface ConnectorConfig {
       decimals: number;
       asset_eip712_name: string;
       asset_eip712_version: string;
+      asset_transfer_method?: string;
+      facilitator_url?: string;
     };
   };
   operator: { bearer_token_file: string; write_keys_file: string };
@@ -192,6 +194,10 @@ describe('settlement', () => {
     expect(connector.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
     expect(connector.settlement.evm.asset_eip712_name).toBe(EXPECTED_EIP712_NAME);
     expect(connector.settlement.evm.asset_eip712_version).toBe(EXPECTED_EIP712_VERSION);
+    // connector#1419: published so a payer knows how to deposit, and who pays
+    // its gas (connector ADR 0076, toon-client#695).
+    expect(connector.settlement.evm.asset_transfer_method).toBe('eip3009');
+    expect(connector.settlement.evm.facilitator_url).toBe('https://onboard.devnet.toonprotocol.dev');
   });
 
   it('never names the x402 contract, the payment-channels program, or the deleted EVM channel index (ADR 0075)', () => {
