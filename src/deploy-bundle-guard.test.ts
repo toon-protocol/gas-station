@@ -32,7 +32,7 @@ const ROUTE_PREFIX = 'g.toon.gas';
 const QUOTE_ROUTE_PREFIX = 'g.toon.gas.quote';
 const RELAY_ROUTE_PREFIX = 'g.toon.relay.gas';
 /** The one immutable connector build this bundle runs. Bump here and in docker-compose.yml together. */
-const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.27.2';
+const CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
 /** Where the connector delivers a paid job. The `/gas` path is load-bearing. */
 const EXECUTE_HANDLER_URL = 'http://gas-station:3300/gas/execute';
 const QUOTE_HANDLER_URL = 'http://gas-station:3300/gas/quote';
@@ -40,24 +40,25 @@ const QUOTE_HANDLER_URL = 'http://gas-station:3300/gas/quote';
 const ROUTE_PRICE = 1000;
 /** The app's two ports. Neither may ever be host-published. */
 const PRIVATE_PORTS = ['3300', '3400'];
-/** Base Sepolia's TokenNetworkRegistry (the 2026-08-28 ADR 0059 cutover's) and the fleet's USDC. */
-const EXPECTED_REGISTRY = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
+/** Devnet's USDC on Base Sepolia (Circle FiatToken v2.2, connector#1337).
+ *  The x402BatchSettlement contract itself is a fixed constant of the
+ *  connector (ADR 0075), never config. */
 const EXPECTED_TOKEN = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
 /** ADR 0010: 6-decimal USDC everywhere. */
 const EXPECTED_DECIMALS = 6;
-/** TOON_Network#182: the local channel index (connector issue #661)
- *  backfills from here on a cold start with no checkpoint, rather than from
- *  genesis against a public RPC that prunes history. The deploy block of the
- *  EXPECTED_REGISTRY/EXPECTED_TOKEN TokenNetwork above -- the
- *  createTokenNetwork transaction recorded in connector
- *  packages/contracts/deployments/base-sepolia.md's 2026-09-25 USDC
- *  cutover. */
-const EXPECTED_CHANNEL_INDEX_FROM_BLOCK = 47285026;
-/** The Solana payment-channel program the connector settles against, and the
- *  mint the fleet settles in — the one the faucet can still mint (its
- *  predecessor's mint authority is lost; connector's devnet-public.md). */
-const SOLANA_PROGRAM_ID = '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip';
+/** The EIP-712 domain EXPECTED_TOKEN signs deposits under (ADR 0075):
+ *  required in every [settlement.evm] table now that every channel is an
+ *  x402 channel. */
+const EXPECTED_EIP712_NAME = 'USDC';
+const EXPECTED_EIP712_VERSION = '2';
+/** The mint the fleet settles in on Solana — the one the faucet can still
+ *  mint (its predecessor's mint authority is lost; connector's
+ *  devnet-public.md). The payment-channels program itself is a fixed
+ *  constant of the connector (ADR 0075), never config. */
 const SOLANA_TOKEN_MINT = '34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU';
+/** The smallest deposit this node sponsors on Solana, in the mint's base
+ *  units (ADR 0075): required in every [settlement.solana] table now. */
+const SOLANA_MIN_SPONSORED_DEPOSIT = 1000000;
 
 const connectorTemplate = read('deploy/connector.toml.template');
 const renderScript = read('deploy/render.sh');
@@ -82,10 +83,10 @@ interface ConnectorConfig {
   routes: { prefix: string; handler_url: string; price: number }[];
   settlement: {
     evm: {
-      contract_address: string;
       token_address: string;
       decimals: number;
-      channel_index_from_block: number;
+      asset_eip712_name: string;
+      asset_eip712_version: string;
     };
   };
   operator: { bearer_token_file: string; write_keys_file: string };
@@ -186,13 +187,20 @@ describe('the peering the relay establishes', () => {
 // ── Settlement ──────────────────────────────────────────────────────────────
 
 describe('settlement', () => {
-  it('points EVM at the live registry, token and decimals', () => {
-    expect(connector.settlement.evm.contract_address).toBe(EXPECTED_REGISTRY);
+  it('points EVM at the live token, decimals and EIP-712 domain', () => {
     expect(connector.settlement.evm.token_address).toBe(EXPECTED_TOKEN);
     expect(connector.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
-    expect(connector.settlement.evm.channel_index_from_block).toBe(
-      EXPECTED_CHANNEL_INDEX_FROM_BLOCK
-    );
+    expect(connector.settlement.evm.asset_eip712_name).toBe(EXPECTED_EIP712_NAME);
+    expect(connector.settlement.evm.asset_eip712_version).toBe(EXPECTED_EIP712_VERSION);
+  });
+
+  it('never names the x402 contract, the payment-channels program, or the deleted EVM channel index (ADR 0075)', () => {
+    // Both are fixed constants of the connector binary now, never config —
+    // and the old TokenNetworkRegistry/program_id/channel_index literals
+    // must not come back.
+    expect(connectorTemplate).not.toMatch(/contract_address/);
+    expect(connectorTemplate).not.toMatch(/channel_index_from_block/);
+    expect(renderScript).not.toContain('program_id');
   });
 
   it('keeps the Solana table out of the template, where render.sh appends it', () => {
@@ -201,8 +209,8 @@ describe('settlement', () => {
     // opt-in once the key holds SOL. Both halves of that have to stay true.
     expect(connectorTemplate).not.toMatch(/^\[settlement\.solana\]/m);
     expect(renderScript).toMatch(/SETTLEMENT_SOLANA/);
-    expect(renderScript).toContain(SOLANA_PROGRAM_ID);
     expect(renderScript).toContain(SOLANA_TOKEN_MINT);
+    expect(renderScript).toContain(String(SOLANA_MIN_SPONSORED_DEPOSIT));
   });
 
   it('explains in the template why the Solana table is not there', () => {
