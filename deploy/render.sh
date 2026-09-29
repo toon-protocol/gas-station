@@ -36,12 +36,16 @@ if [ "${SETTLEMENT_SOLANA:-off}" = "on" ]; then
 
 # Accepting Solana-paid claims. Requires /app/data/settlement-solana.key to
 # hold SOL before this container starts — startup simulates a transaction, and
-# an account with no prior credit cannot.
+# an account with no prior credit cannot. payment-channels is a fixed
+# constant of the connector now (ADR 0075), never config.
 [settlement.solana]
-rpc_url       = "https://api.devnet.solana.com"
-program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"  # mock USDC (6dp), the mint the faucet can still mint
-decimals      = 6
+rpc_url               = "https://api.devnet.solana.com"
+token_address         = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"  # mock USDC (6dp), the mint the faucet can still mint
+decimals              = 6
+# The smallest deposit this node spends its own rent sponsoring, in the
+# mint's base units: 1 USDC. Required now that every channel is an x402
+# channel (ADR 0075).
+min_sponsored_deposit = 1000000
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
