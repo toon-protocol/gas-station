@@ -52,15 +52,28 @@ Image-publish workflow: `publish-gas-station-image.yml` (→
 `ghcr.io/toon-protocol/gas-station`, moving the `:release` tag Watchtower
 follows on every green `main`).
 
-## Shared skills, docs & project context → toon-protocol/toon-meta
-Cross-cutting agent skills, docs, and the canonical project context live in
-**[toon-protocol/toon-meta](https://github.com/toon-protocol/toon-meta)**. Load
-the shared skills:
-```
-/plugin marketplace add toon-protocol/toon-meta
-/plugin install toon-skills@toon-meta
-```
-Canonical rules/decisions: `toon-meta` → `context/context.md`.
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`toon-protocol/gas-station`, via the `gh` CLI).
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, names unchanged. `ready-for-agent` is the queue for the
+AFK factory (`.github/workflows/agent-implement.yml`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: this file, plus the vocabulary and ADRs that live in `toon-protocol/connector`.
+See `docs/agents/domain.md`.
+
+### Gate
+
+CI's `build` job is `pnpm install --frozen-lockfile`, then `pnpm build`, `pnpm typecheck`,
+`pnpm lint` and `pnpm test`. The AFK runner (`.sandcastle/run-gate.ts`) runs the same commands
+in that order and won't open a PR while any is red.
 
 ## Cross-repo dependencies
 - Depends on no TOON package at runtime. The handler context/response types are
