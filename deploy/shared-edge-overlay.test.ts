@@ -14,7 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, beforeAll } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 
 const DEPLOY_DIR = dirname(fileURLToPath(import.meta.url));
@@ -54,16 +54,15 @@ function composeConfig(files: string[], extraArgs: string[] = []): ComposeConfig
   return parseYaml(result.stdout) as ComposeConfig;
 }
 
-let dockerAvailable = true;
-beforeAll(() => {
-  const probe = spawnSync('docker', ['compose', 'version'], { encoding: 'utf8' });
-  dockerAvailable = probe.status === 0;
-  if (!dockerAvailable) {
-    console.warn(
-      'docker (with the compose plugin) is not on PATH -- skipping shared-edge overlay tests.'
-    );
-  }
-});
+// Probed at module load, not in beforeAll: `maybe()` picks it vs it.skip while
+// the suite is being collected, which is before any beforeAll has run.
+const dockerAvailable =
+  spawnSync('docker', ['compose', 'version'], { encoding: 'utf8' }).status === 0;
+if (!dockerAvailable) {
+  console.warn(
+    'docker (with the compose plugin) is not on PATH -- skipping shared-edge overlay tests.'
+  );
+}
 
 const maybe = () => (dockerAvailable ? it : it.skip);
 
