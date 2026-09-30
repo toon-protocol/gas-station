@@ -14,7 +14,7 @@ push, open a PR or close the issue. The runner does all three once you finish.
 - Never widen a whitelist to make a caller's transaction work. A policy refusal is an accepted
   job with a machine-readable `reason`, not a transport reject.
 - No test may touch a live chain. Both handler suites inject stub RPC seams.
-- It is a single-package pnpm repo (`pnpm@8.15.9`, Node 22). Dependencies are already installed.
+- It is a single-package pnpm repo (`pnpm@8.15.9`, Node 22). The shared sandbox image has Node, pnpm (via corepack, from `packageManager`), gh and Claude Code, plus Rust, Foundry and the Solana CLI, which this repo does not use. Dependencies are already installed.
 - After you finish, the runner runs CI's `build` job itself and won't open a PR while it is red:
   `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm typecheck`, `pnpm lint` and `pnpm test`.
   Run them yourself before you commit. Never weaken, skip or delete a test, and never loosen a
