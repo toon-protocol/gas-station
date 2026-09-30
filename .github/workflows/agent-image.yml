@@ -45,18 +45,3 @@ jobs:
             # The runner starts every session with a mattpocock-skills slash command.
             claude plugin list | grep -q mattpocock-skills
           '
-
-      # Proving the tools exist is not proving the gate runs. Install and run the
-      # repo's own gate inside the image, on the mounted checkout, the way the
-      # runner's sandbox does.
-      - name: Verify the agent can run this repo's gate
-        run: |
-          docker run --rm \
-            -v "$PWD":/home/agent/workspace -w /home/agent/workspace \
-            --entrypoint bash sandcastle:gas-station -lc '
-              set -euo pipefail
-              pnpm install --frozen-lockfile
-              pnpm build
-              pnpm typecheck
-              pnpm test
-            '

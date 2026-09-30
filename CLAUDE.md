@@ -73,7 +73,7 @@ See `docs/agents/domain.md`.
 
 CI's `build` job is `pnpm install --frozen-lockfile`, then `pnpm build`, `pnpm typecheck`,
 `pnpm lint` and `pnpm test`. The AFK runner (`.sandcastle/run-gate.ts`) runs the same commands
-in that order and won't open a PR while any is red.
+in that order and won't open a PR while any is red. It leaves out `src/gate-regression-guard.ts`, whose baseline is a GitHub runner's wall-clock.
 
 ## Cross-repo dependencies
 - Depends on no TOON package at runtime. The handler context/response types are

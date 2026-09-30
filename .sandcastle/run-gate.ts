@@ -109,7 +109,7 @@ export function fixPrompt(failure: GateFailure, attempt: number, maxAttempts: nu
     '',
     'Fix the cause and commit. Rules:',
     `- Re-run \`${failure.command}\` yourself and confirm it passes before you finish.`,
-    '- Fix the code. Do NOT weaken, skip, delete or #[ignore] a test, and do not',
+    '- Fix the code. Do NOT weaken, skip, delete or skip a test, and do not',
     '  loosen a lint to make this pass — if the test is genuinely wrong, say so',
     '  explicitly in the commit message and explain why.',
     '- Change only what this failure requires. Do not refactor beyond it.',
