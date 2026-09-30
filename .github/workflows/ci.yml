@@ -2,7 +2,8 @@ name: CI
 
 on:
   pull_request:
-    # ready_for_review is not a default type; the no-op guard wants it.
+    # ready_for_review is not a default type; the no-op guard wants it so a
+    # draft re-checks its merge result when it is marked ready.
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]

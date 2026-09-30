@@ -32,6 +32,7 @@ P1=$(git rev-parse HEAD^1)
 P2=$(git rev-parse HEAD^2)
 
 # Assert the parent order against the event payload rather than trusting it.
+PR_HEAD_SHA="${PR_HEAD_SHA:-}"
 if [ "$P2" = "$PR_HEAD_SHA" ]; then
   BASE="$P1"
 elif [ "$P1" = "$PR_HEAD_SHA" ]; then
@@ -41,7 +42,13 @@ else
   exit 0
 fi
 
-if ! git diff --quiet "$BASE" HEAD; then
+git diff --quiet "$BASE" HEAD
+DIFF_STATUS=$?
+if [ "$DIFF_STATUS" -gt 1 ]; then
+  echo "::warning::git diff $BASE HEAD failed (status $DIFF_STATUS) — the merge result could not be evaluated."
+  exit 0
+fi
+if [ "$DIFF_STATUS" -eq 1 ]; then
   CHANGED=$(git diff --name-only "$BASE" HEAD | wc -l)
   echo "✓ merging this PR changes $CHANGED file(s) against $PR_BASE_REF"
   exit 0

@@ -33,7 +33,16 @@ function git(cwd: string, ...args: string[]): string {
       'commit.gpgsign=false',
       ...args,
     ],
-    { cwd, encoding: 'utf8' },
+    {
+      cwd,
+      encoding: 'utf8',
+      // Keep the caller's git config, hooks and GIT_DIR out of the scratch repo.
+      env: {
+        PATH: process.env.PATH ?? '',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+      },
+    },
   ).trim();
 }
 
@@ -50,15 +59,10 @@ function mergeRef(opts: { prChangesFile: boolean; landOnBase: boolean }) {
   git(dir, 'add', '.');
   git(dir, 'commit', '-q', '-m', 'base');
   git(dir, 'checkout', '-q', '-b', 'pr');
-  if (opts.prChangesFile) {
-    writeFileSync(join(dir, 'a.txt'), 'two\n');
-    git(dir, 'commit', '-q', '-am', 'pr change');
-  } else {
-    // A change and its revert: commits that cancel out.
-    writeFileSync(join(dir, 'a.txt'), 'two\n');
-    git(dir, 'commit', '-q', '-am', 'pr change');
-    git(dir, 'revert', '--no-edit', 'HEAD');
-  }
+  writeFileSync(join(dir, 'a.txt'), 'two\n');
+  git(dir, 'commit', '-q', '-am', 'pr change');
+  // Otherwise a change and its revert: commits that cancel out.
+  if (!opts.prChangesFile) git(dir, 'revert', '--no-edit', 'HEAD');
   const head = git(dir, 'rev-parse', 'HEAD');
   git(dir, 'checkout', '-q', 'main');
   if (opts.landOnBase) {
@@ -123,5 +127,12 @@ describe('no-op merge guard', () => {
     const r = run(dir, head, '1');
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('::warning::');
+  });
+
+  it('warns and passes when the merge ref is stale', () => {
+    const { dir } = mergeRef({ prChangesFile: false, landOnBase: false });
+    const r = run(dir, '0'.repeat(40), '0');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('stale');
   });
 });
