@@ -230,7 +230,7 @@ it pays the relay from — is established the same way from here:
 ```bash
 # from a shell holding the private half of OPERATOR_WRITE_KEY
 sign-write.sh -k operator-write.key -X POST -p /peers \
-  -b '{"id":"relay","url":"https://proxy.relay.devnet.toonprotocol.dev/ilp","fee":1,"max_packet_amount":100000,"chain":"solana"}' \
+  -b '{"id":"relay","url":"https://toonprotocol.dev/ilp","fee":1,"max_packet_amount":100000,"chain":"solana"}' \
   -u https://proxy.gas.<domain>
 ```
 
@@ -720,7 +720,7 @@ it pays the relay from — is established the same way from here:
 ```bash
 # from a shell holding the private half of OPERATOR_WRITE_KEY
 sign-write.sh -k operator-write.key -X POST -p /peers \
-  -b '{"id":"relay","url":"https://proxy.relay.devnet.toonprotocol.dev/ilp","fee":1,"max_packet_amount":100000,"chain":"solana"}' \
+  -b '{"id":"relay","url":"https://toonprotocol.dev/ilp","fee":1,"max_packet_amount":100000,"chain":"solana"}' \
   -u https://proxy.gas.<domain>
 ```
 
