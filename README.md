@@ -118,7 +118,7 @@ the price of each route. Between the two you have everything needed to send a
 job: what to send, where to send it, and what it costs.
 
 ```bash
-curl https://proxy.gas.devnet.toonprotocol.dev/ilp
+curl https://toonprotocol.dev/ilp
 ```
 
 Two documents is one too many, and `GET /ilp` is the one that should carry
