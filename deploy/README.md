@@ -276,7 +276,10 @@ history.
 
 It is also never reachable from off-box. There is no nginx location for
 `:3300`, and the service publishes no port — the only path in is a paid packet
-through the connector. A public path to `POST /gas` would be a free door:
+through the connector. (Under the shared-edge overlay that connector is the
+devnet's one connector, the relay's, which reaches `:3300` as `gas-web:3300`
+over this node's own `edge-gas` network; the edge must never route a public
+hostname there.) A public path to `POST /gas` would be a free door:
 anyone who found the URL would get their transactions signed and their gas paid
 out of this box's float, for nothing.
 
@@ -292,17 +295,22 @@ connector is `127.0.0.1:4000:4000`, and the app publishes nothing at all — so
 the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses. Under the
-shared-edge overlay this moves to `127.0.0.1:4002:4000` — see "Running behind
-the shared edge", below.
+shared-edge overlay this bundle runs no connector at all and publishes nothing
+— see "Running behind the shared edge", below.
 
 ## Running behind the shared edge
 
 The devnet is moving onto one Linode, shared by the relay, store, gas
 station, workload gateway and faucet nodes, behind one shared Caddy edge that
-owns ports 80 and 443 (infra#24, infra ADR 0001, infra#25). This node keeps
-its own connector, keys and hostnames — only its own nginx, certbot and
-Watchtower go away, and the edge reaches its containers directly over an
-external Docker network instead of over this box's own port 80/443.
+owns ports 80 and 443 (infra#24, infra ADR 0001, infra#25). This node's own
+nginx, certbot and Watchtower go away, and so does its own connector: the
+devnet runs **one** connector, the relay's, at
+**`https://toonprotocol.dev/ilp`**. It joins `edge-gas` and routes the gas
+station's prefixes straight to `http://gas-web:3300/gas/quote` and
+`http://gas-web:3300/gas/execute`, at the same prices as before. The edge
+reaches `gas-web:3400` (health) over the same network. A gas-station operator
+running this bundle standalone is unaffected: `docker-compose.yml` and
+`connector.toml.template` still bring up this bundle's own connector.
 
 **The overlay is off by default.** Nothing here changes what a plain
 `docker compose up -d` does until you opt in, which is what lets this merge
@@ -326,41 +334,32 @@ line out of `.env` runs `docker-compose.yml` alone, exactly as today.
 [`docker-compose.shared-edge.yml`](./docker-compose.shared-edge.yml) is the
 overlay itself; the comment at its top has the full accounting. In short, it:
 
-- disables `nginx`, `certbot` and `watchtower` (`profiles: [disabled]`, a
-  profile nothing ever activates) — no host port 80 or 443 is bound by this
-  bundle at all once it is on;
-- joins `connector` and `gas-station` to the external `edge-gas` network
-  (this node's own network, not one shared flat network every node joins --
-  infra#24's edge project creates one per node and Caddy joins all five, so
-  only the edge can reach a given node) under stable aliases, so the edge can
-  reach them without depending on this box's own DNS resolution of container
-  names;
+- disables `nginx`, `certbot`, `watchtower` and `connector` (`profiles:
+  [disabled]`, a profile nothing ever activates) — no host port 80 or 443,
+  and no connector loopback port, is bound by this bundle at all once it is
+  on. The connector's `connector_state` volume is left in place;
+- joins `gas-station` to the external `edge-gas` network (this node's own
+  network, not one shared flat network every node joins -- infra#24's edge
+  project creates one per node, and Caddy and the relay's one connector join
+  them) under the stable alias `gas-web`, so they can reach it without
+  depending on this box's own DNS resolution of container names;
 - adds a `mem_limit` to every service, sized from real `docker stats`
   measurements taken on the shared devnet host itself on 2026-09-25 (infra#25
   step 2), now that the host is confirmed to be a 1 GB Linode nanode (961 MB
   total, ~350 MB already used by the OS and Docker) rather than the 2 GB host
   earlier revisions of this overlay assumed: connector measured 3 MB idle,
-  gas-station measured 28 MB idle, giving `mem_limit`s of 64m and 256m
-  respectively (the latter alongside an overlay-level `NODE_OPTIONS` override
-  tightening the app's V8 heap cap to 192 MB) — see the overlay file's own
-  comment for the full arithmetic;
-- moves the connector's loopback publish to **`127.0.0.1:4002:4000`**
-  (`ports: !override`, so it is the *only* publish once the overlay is on).
-  Every node bundle's own `docker-compose.yml` publishes its connector on
-  `127.0.0.1:4000`, and those collide once several nodes share one host — a
-  real outage (infra#25). The container side stays 4000; only the host side
-  moves, to this node's own assignment:
+  gas-station measured 28 MB idle, giving `mem_limit`s of 64m (kept though
+  the connector is disabled) and 256m respectively (the latter alongside an
+  overlay-level `NODE_OPTIONS` override tightening the app's V8 heap cap to
+  192 MB) — see the overlay file's own
+  comment for the full arithmetic.
 
-  | Node | Host loopback port |
-  |---|---|
-  | relay | `127.0.0.1:3000` |
-  | gateway | `127.0.0.1:4001` |
-  | gas-station | `127.0.0.1:4002` |
-  | store | `127.0.0.1:4003` |
-
-  Neither `bootstrap.sh` nor `auto-apply.sh` reads this port from the host —
-  `auto-apply.sh` waits for the connector via `docker inspect`'s own health
-  status, not a host-side curl — so neither needed a change for this.
+`docker compose up -d` does **not** stop a container whose service a profile
+has just switched off, so `auto-apply.sh` asks `docker compose config
+--services` whether the stack still has a connector. When it does not, it
+stops and removes the old connector container (`rm -sf`, which keeps
+`connector_state`), skips the connector health wait and restart, and waits
+on the gas station's own healthcheck instead.
 
 `bootstrap.sh` and `init-letsencrypt.sh` both skip certificate issuance when
 `COMPOSE_FILE` names `docker-compose.shared-edge.yml` specifically (each greps
@@ -379,12 +378,14 @@ this node's own `edge-gas` network, not a network shared with any other node:
 
 | Hostname | Edge upstream (alias:port, on `edge-gas`) | Container:port today |
 |---|---|---|
-| `proxy.gas.${DOMAIN}` | `gas-proxy:4000` | `connector:4000` |
 | `gas.${DOMAIN}` | `gas-web:3400` | `gas-station:3400` |
 
-Neither alias is `gas-station`'s job port, `:3300` — that door is never
-published or aliased anywhere, on or off the overlay. See "Privacy
-invariant", above.
+`proxy.gas.${DOMAIN}` no longer has an upstream on this box: the paid ILP
+edge is the relay's one connector at `https://toonprotocol.dev/ilp` (the
+infra repo repoints the old `proxy.*` names at it), and it reaches the job
+door at `gas-web:3300` (`/gas/quote`, `/gas/execute`). The edge itself must
+never route a public hostname to `:3300`, which is still never published.
+See "Privacy invariant", above.
 
 ### What nginx does beyond plain proxying
 
@@ -410,8 +411,8 @@ everything here is in `nginx/node.conf.template`:
   config-parse time, so when `auto-apply.sh` or Watchtower recreates a
   container at a new address a literal upstream 502s until nginx is reloaded.
   Going through a variable forces a fresh Docker-DNS lookup every 10s instead.
-  The edge needs the same property against its own `gas-proxy`/`gas-web`
-  aliases — those aliases are stable, but the address behind them still moves
+  The edge needs the same property against its own `gas-web`
+  alias — that alias is stable, but the address behind it still moves
   on every recreate, `auto-apply.sh`'s included (Watchtower itself is disabled
   under the overlay, but nothing else is).
 - **`proxy_read_timeout 1h`** on the general block, longer than nginx's
@@ -765,7 +766,10 @@ history.
 
 It is also never reachable from off-box. There is no nginx location for
 `:3300`, and the service publishes no port — the only path in is a paid packet
-through the connector. A public path to `POST /gas` would be a free door:
+through the connector. (Under the shared-edge overlay that connector is the
+devnet's one connector, the relay's, which reaches `:3300` as `gas-web:3300`
+over this node's own `edge-gas` network; the edge must never route a public
+hostname there.) A public path to `POST /gas` would be a free door:
 anyone who found the URL would get their transactions signed and their gas paid
 out of this box's float, for nothing.
 
@@ -781,17 +785,22 @@ connector is `127.0.0.1:4000:4000`, and the app publishes nothing at all — so
 the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses. Under the
-shared-edge overlay this moves to `127.0.0.1:4002:4000` — see "Running behind
-the shared edge", below.
+shared-edge overlay this bundle runs no connector at all and publishes nothing
+— see "Running behind the shared edge", below.
 
 ## Running behind the shared edge
 
 The devnet is moving onto one Linode, shared by the relay, store, gas
 station, workload gateway and faucet nodes, behind one shared Caddy edge that
-owns ports 80 and 443 (infra#24, infra ADR 0001, infra#25). This node keeps
-its own connector, keys and hostnames — only its own nginx, certbot and
-Watchtower go away, and the edge reaches its containers directly over an
-external Docker network instead of over this box's own port 80/443.
+owns ports 80 and 443 (infra#24, infra ADR 0001, infra#25). This node's own
+nginx, certbot and Watchtower go away, and so does its own connector: the
+devnet runs **one** connector, the relay's, at
+**`https://toonprotocol.dev/ilp`**. It joins `edge-gas` and routes the gas
+station's prefixes straight to `http://gas-web:3300/gas/quote` and
+`http://gas-web:3300/gas/execute`, at the same prices as before. The edge
+reaches `gas-web:3400` (health) over the same network. A gas-station operator
+running this bundle standalone is unaffected: `docker-compose.yml` and
+`connector.toml.template` still bring up this bundle's own connector.
 
 **The overlay is off by default.** Nothing here changes what a plain
 `docker compose up -d` does until you opt in, which is what lets this merge
@@ -815,41 +824,32 @@ line out of `.env` runs `docker-compose.yml` alone, exactly as today.
 [`docker-compose.shared-edge.yml`](./docker-compose.shared-edge.yml) is the
 overlay itself; the comment at its top has the full accounting. In short, it:
 
-- disables `nginx`, `certbot` and `watchtower` (`profiles: [disabled]`, a
-  profile nothing ever activates) — no host port 80 or 443 is bound by this
-  bundle at all once it is on;
-- joins `connector` and `gas-station` to the external `edge-gas` network
-  (this node's own network, not one shared flat network every node joins --
-  infra#24's edge project creates one per node and Caddy joins all five, so
-  only the edge can reach a given node) under stable aliases, so the edge can
-  reach them without depending on this box's own DNS resolution of container
-  names;
+- disables `nginx`, `certbot`, `watchtower` and `connector` (`profiles:
+  [disabled]`, a profile nothing ever activates) — no host port 80 or 443,
+  and no connector loopback port, is bound by this bundle at all once it is
+  on. The connector's `connector_state` volume is left in place;
+- joins `gas-station` to the external `edge-gas` network (this node's own
+  network, not one shared flat network every node joins -- infra#24's edge
+  project creates one per node, and Caddy and the relay's one connector join
+  them) under the stable alias `gas-web`, so they can reach it without
+  depending on this box's own DNS resolution of container names;
 - adds a `mem_limit` to every service, sized from real `docker stats`
   measurements taken on the shared devnet host itself on 2026-09-25 (infra#25
   step 2), now that the host is confirmed to be a 1 GB Linode nanode (961 MB
   total, ~350 MB already used by the OS and Docker) rather than the 2 GB host
   earlier revisions of this overlay assumed: connector measured 3 MB idle,
-  gas-station measured 28 MB idle, giving `mem_limit`s of 64m and 256m
-  respectively (the latter alongside an overlay-level `NODE_OPTIONS` override
-  tightening the app's V8 heap cap to 192 MB) — see the overlay file's own
-  comment for the full arithmetic;
-- moves the connector's loopback publish to **`127.0.0.1:4002:4000`**
-  (`ports: !override`, so it is the *only* publish once the overlay is on).
-  Every node bundle's own `docker-compose.yml` publishes its connector on
-  `127.0.0.1:4000`, and those collide once several nodes share one host — a
-  real outage (infra#25). The container side stays 4000; only the host side
-  moves, to this node's own assignment:
+  gas-station measured 28 MB idle, giving `mem_limit`s of 64m (kept though
+  the connector is disabled) and 256m respectively (the latter alongside an
+  overlay-level `NODE_OPTIONS` override tightening the app's V8 heap cap to
+  192 MB) — see the overlay file's own
+  comment for the full arithmetic.
 
-  | Node | Host loopback port |
-  |---|---|
-  | relay | `127.0.0.1:3000` |
-  | gateway | `127.0.0.1:4001` |
-  | gas-station | `127.0.0.1:4002` |
-  | store | `127.0.0.1:4003` |
-
-  Neither `bootstrap.sh` nor `auto-apply.sh` reads this port from the host —
-  `auto-apply.sh` waits for the connector via `docker inspect`'s own health
-  status, not a host-side curl — so neither needed a change for this.
+`docker compose up -d` does **not** stop a container whose service a profile
+has just switched off, so `auto-apply.sh` asks `docker compose config
+--services` whether the stack still has a connector. When it does not, it
+stops and removes the old connector container (`rm -sf`, which keeps
+`connector_state`), skips the connector health wait and restart, and waits
+on the gas station's own healthcheck instead.
 
 `bootstrap.sh` and `init-letsencrypt.sh` both skip certificate issuance when
 `COMPOSE_FILE` names `docker-compose.shared-edge.yml` specifically (each greps
@@ -868,12 +868,14 @@ this node's own `edge-gas` network, not a network shared with any other node:
 
 | Hostname | Edge upstream (alias:port, on `edge-gas`) | Container:port today |
 |---|---|---|
-| `proxy.gas.${DOMAIN}` | `gas-proxy:4000` | `connector:4000` |
 | `gas.${DOMAIN}` | `gas-web:3400` | `gas-station:3400` |
 
-Neither alias is `gas-station`'s job port, `:3300` — that door is never
-published or aliased anywhere, on or off the overlay. See "Privacy
-invariant", above.
+`proxy.gas.${DOMAIN}` no longer has an upstream on this box: the paid ILP
+edge is the relay's one connector at `https://toonprotocol.dev/ilp` (the
+infra repo repoints the old `proxy.*` names at it), and it reaches the job
+door at `gas-web:3300` (`/gas/quote`, `/gas/execute`). The edge itself must
+never route a public hostname to `:3300`, which is still never published.
+See "Privacy invariant", above.
 
 ### What nginx does beyond plain proxying
 
@@ -899,8 +901,8 @@ everything here is in `nginx/node.conf.template`:
   config-parse time, so when `auto-apply.sh` or Watchtower recreates a
   container at a new address a literal upstream 502s until nginx is reloaded.
   Going through a variable forces a fresh Docker-DNS lookup every 10s instead.
-  The edge needs the same property against its own `gas-proxy`/`gas-web`
-  aliases — those aliases are stable, but the address behind them still moves
+  The edge needs the same property against its own `gas-web`
+  alias — that alias is stable, but the address behind it still moves
   on every recreate, `auto-apply.sh`'s included (Watchtower itself is disabled
   under the overlay, but nothing else is).
 - **`proxy_read_timeout 1h`** on the general block, longer than nginx's

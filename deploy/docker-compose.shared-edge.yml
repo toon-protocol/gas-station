@@ -3,8 +3,9 @@
 # =============================================================================
 # The devnet is moving onto one Linode, shared by the relay, store, gas
 # station, workload gateway and faucet nodes, behind one shared Caddy edge
-# that owns ports 80 and 443. This node keeps its own connector, keys and
-# hostnames -- only its own TLS front goes away.
+# that owns ports 80 and 443. This node's own TLS front goes away, and so does
+# its own connector: the devnet runs ONE connector, the relay's, at
+# https://toonprotocol.dev/ilp, which routes to the gas station directly.
 #
 # Turned on the way the provider's HIDDEN overlay is: one line in .env --
 #
@@ -24,30 +25,32 @@
 #                                 once. auto-apply.sh already pulls the pinned
 #                                 connector and gas-station images unattended,
 #                                 so losing watchtower here costs nothing.
-#   connector                    joins the external `edge-gas` network under
-#                                 the stable alias `gas-proxy`, so the edge
-#                                 can reach it at `gas-proxy:4000` for
-#                                 proxy.gas.${DOMAIN}. Its loopback publish
-#                                 MOVES to 127.0.0.1:4002:4000 (`ports:
-#                                 !override`, below): every node bundle's own
-#                                 docker-compose.yml publishes 127.0.0.1:4000,
-#                                 and those collide once several nodes share
-#                                 one host -- a real outage (infra#25). The
-#                                 container side stays 4000; only the host
-#                                 side moves, to this node's own assignment.
-#                                 `!override` replaces the whole `ports:` list
-#                                 rather than merging into it, so 4002 is the
-#                                 ONLY thing published once the overlay is on.
-#                                 Neither bootstrap.sh nor auto-apply.sh reads
-#                                 this loopback port from the host at all
-#                                 (auto-apply.sh checks connector health via
-#                                 `docker inspect`, not a host-side curl), so
-#                                 neither needed a change for this.
+#   connector                    DISABLED too (`profiles: [disabled]`). The
+#                                 devnet runs ONE connector, the relay's, at
+#                                 https://toonprotocol.dev/ilp; it joins
+#                                 `edge-gas` itself and routes the gas
+#                                 station's prefixes straight to
+#                                 http://gas-web:3300/gas/quote and
+#                                 http://gas-web:3300/gas/execute (prices
+#                                 unchanged). docker-compose.yml and
+#                                 connector.toml.template keep this bundle's
+#                                 own connector for every operator who runs
+#                                 it standalone. Its volume (connector_state)
+#                                 is left in place. auto-apply.sh notices the
+#                                 connector is gone from the stack, removes
+#                                 its old container (`up -d` alone leaves a
+#                                 profile-disabled container running) and
+#                                 waits on the gas station's healthcheck
+#                                 instead.
 #   gas-station                  joins `edge-gas` under the alias `gas-web`,
 #                                 so the edge can reach gas.${DOMAIN} at
-#                                 `gas-web:3400`. Its job door (:3300) is
-#                                 still never published or aliased anywhere --
-#                                 see README.md "Privacy invariant".
+#                                 `gas-web:3400` and the relay's one
+#                                 connector can reach its job door,
+#                                 `gas-web:3300`, as the termination of a
+#                                 paid route. The job door is still never
+#                                 PUBLISHED, and the edge must never route a
+#                                 public hostname to :3300 -- see README.md
+#                                 "Privacy invariant".
 #
 # `edge-gas` IS THIS NODE'S OWN NETWORK, not a flat network shared by every
 # node on the host (shared contract v2). infra#24's edge project creates one
@@ -55,18 +58,19 @@
 # `edge-gateway`, `edge-faucet`) and Caddy joins all five; each node's own
 # overlay joins only its own. On one flat network any node could reach any
 # other node's connector `/admin` or the gateway's handover port -- per-node
-# networks mean only the edge itself can reach a node.
+# networks mean only the edge (and the relay's one connector, which joins
+# each app's network to route to it) can reach a node.
 #
 # See deploy/README.md "Running behind the shared edge" for the alias:port
 # table this was worked out from (deploy/nginx/node.conf.template), and for
 # everything nginx does today that the edge has to replicate -- the rate
 # limit and the CORS header on /ilp/identity matter most.
 #
-# `networks: default: {}` is repeated on both services below because ADDING
-# an explicit `networks:` key to a service that otherwise gets the implicit
+# `networks: default: {}` is kept on the gas station below because ADDING an
+# explicit `networks:` key to a service that otherwise gets the implicit
 # default network REPLACES it rather than extending it -- so without this,
-# joining `edge-gas` would silently cut the connector and the app off from
-# each other (the connector proxies to gas-station:3300 over that network).
+# joining `edge-gas` would silently cut the app off from the rest of its own
+# project.
 # Same pattern as the provider's `docker-compose.hidden.yml`.
 #
 # ── mem_limit ────────────────────────────────────────────────────────────────
@@ -78,7 +82,9 @@
 # Idle `docker stats` on that host: connector 3 MB, gas-station app 28 MB.
 #
 # connector: 64m is ~4x its measured 3 MB idle -- plenty of headroom for a
-# lightweight proxy with no heap cap of its own.
+# lightweight proxy with no heap cap of its own. The connector is disabled
+# under this overlay now; the limit is kept for the same reason as the three
+# below.
 #
 # gas-station: this overlay now also overrides NODE_OPTIONS (in the service's
 # `environment` below) to --max-old-space-size=192, down from the base's 256
@@ -95,22 +101,17 @@
 # =============================================================================
 
 services:
+  # Disabled the same way as nginx/certbot/watchtower below. The devnet's one
+  # connector is the relay's (https://toonprotocol.dev/ilp): it joins
+  # `edge-gas` and routes the gas station's prefixes straight to
+  # http://gas-web:3300/gas/quote and /gas/execute, at the same prices as
+  # before. No edge alias and no loopback publish any more -- nothing runs to
+  # carry them. The connector_state volume is left in place.
   connector:
-    # measured idle 3 MB on 2026-09-25 (infra#25 step 2); limit ≈4x idle
+    # measured idle 3 MB on 2026-09-25 (infra#25 step 2); limit ≈4x idle,
+    # kept in case the profile is ever activated by hand.
     mem_limit: 64m
-    networks:
-      default: {}
-      edge-gas:
-        aliases: [gas-proxy]
-    # Shared host, one connector loopback port each (infra#25): every node
-    # bundle's docker-compose.yml publishes its connector on 127.0.0.1:4000,
-    # which collided the day two nodes landed on the same box. `!override`
-    # (Compose >=2.24) replaces the whole `ports:` list rather than merging
-    # into it, so 4002 is this node's ONLY publish under the overlay. The
-    # container side stays 4000 -- nothing inside the container, including
-    # its own healthcheck, changes.
-    ports: !override
-      - '127.0.0.1:4002:4000'
+    profiles: [disabled]
 
   gas-station:
     # measured idle 28 MB on 2026-09-25 (infra#25 step 2); the overlay's own

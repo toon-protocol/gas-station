@@ -12,7 +12,8 @@
  * workflow already assumes in CI.
  */
 import { spawnSync } from 'node:child_process';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -100,12 +101,14 @@ describe('the default bundle, without the overlay', () => {
 describe('the shared-edge overlay, applied the way COMPOSE_FILE turns it on', () => {
   const files = ['docker-compose.yml', 'docker-compose.shared-edge.yml'];
 
-  maybe()('disables nginx, certbot and watchtower, and binds no host port 80 or 443', () => {
+  maybe()('disables nginx, certbot, watchtower and the connector, and binds no host port 80 or 443', () => {
     const merged = composeConfig(files);
 
     // `docker compose config` (like `up`) leaves out a service whose profile
-    // was never activated -- which IS the disabling.
-    expect(Object.keys(merged.services).sort()).toEqual(['connector', 'gas-station'].sort());
+    // was never activated -- which IS the disabling. The connector too: the
+    // devnet runs ONE connector, the relay's at https://toonprotocol.dev/ilp,
+    // which reaches the app over edge-gas as gas-web:3300.
+    expect(Object.keys(merged.services)).toEqual(['gas-station']);
 
     const everyPublished = Object.values(merged.services).flatMap((s) =>
       (s.ports ?? []).map((p) => String(p.published))
@@ -120,25 +123,30 @@ describe('the shared-edge overlay, applied the way COMPOSE_FILE turns it on', ()
     // deleted by the overlay, which would look identical from the test above
     // alone.
     const withDisabled = composeConfig(files, ['--profile', 'disabled']);
-    for (const name of ['nginx', 'certbot', 'watchtower']) {
+    for (const name of ['nginx', 'certbot', 'watchtower', 'connector']) {
       expect(withDisabled.services[name]?.profiles).toEqual(['disabled']);
     }
   });
 
-  maybe()('joins connector and gas-station to the external `edge-gas` network under the contract aliases', () => {
+  maybe()('joins gas-station to the external `edge-gas` network as `gas-web`, keeping its default network', () => {
     const merged = composeConfig(files);
 
     expect(merged.networks?.['edge-gas']).toMatchObject({ external: true });
 
-    // proxy.gas.${DOMAIN} -> connector:4000, under alias gas-proxy.
-    expect(merged.services.connector?.networks?.['edge-gas']?.aliases).toEqual(['gas-proxy']);
-    // gas.${DOMAIN} -> gas-station:3400, under alias gas-web.
+    // gas.${DOMAIN} -> gas-web:3400 for the edge, and gas-web:3300 for the
+    // relay's one connector.
     expect(merged.services['gas-station']?.networks?.['edge-gas']?.aliases).toEqual(['gas-web']);
-
-    // Neither service lost the implicit default network it needs to reach the
-    // other one over (the connector proxies to gas-station:3300/3400 there).
-    expect(merged.services.connector?.networks).toHaveProperty('default');
     expect(merged.services['gas-station']?.networks).toHaveProperty('default');
+  });
+
+  maybe()('leaves the disabled connector no edge alias and no loopback publish', () => {
+    const overlay = parseYaml(
+      readFileSync(join(DEPLOY_DIR, 'docker-compose.shared-edge.yml'), 'utf8')
+    ) as ComposeConfig;
+    const connector = overlay.services.connector;
+    expect(connector?.profiles).toEqual(['disabled']);
+    expect(connector?.networks).toBeUndefined();
+    expect(connector?.ports).toBeUndefined();
   });
 
   maybe()('joins ONLY this node\'s own `edge-gas` network, never the flat `edge` name shared-contract v2 retired', () => {
@@ -156,39 +164,26 @@ describe('the shared-edge overlay, applied the way COMPOSE_FILE turns it on', ()
     }
   });
 
-  maybe()('never aliases or exposes the job door, :3300, on the edge network', () => {
+  maybe()('never publishes the job door, :3300, nor aliases it under its own service name', () => {
     const merged = composeConfig(files);
     const app = merged.services['gas-station'];
-    // The health port is what the edge is aliased to serve; the job door is
-    // still reached only by the connector, over the compose network -- see
-    // README.md "Privacy invariant".
+    // The health port is what the edge serves; the job door is reached only
+    // by a connector (the relay's one connector, via gas-web:3300) and is
+    // never published -- see README.md "Privacy invariant".
     expect(app?.expose?.map(String)).toContain('3300');
     expect(app?.networks?.['edge-gas']?.aliases).not.toContain('gas-station');
+    expect(app?.ports ?? []).toEqual([]);
   });
 
   maybe()('gives every service in the bundle a mem_limit, active or disabled', () => {
     // `--profile disabled` is what makes docker compose config even print the
-    // three disabled services -- the default `config` run above (correctly)
+    // four disabled services -- the default `config` run above (correctly)
     // omits them entirely, the same as `up -d` would.
     const withDisabled = composeConfig(files, ['--profile', 'disabled']);
     for (const [name, service] of Object.entries(withDisabled.services)) {
       expect(service.mem_limit, `${name} has no mem_limit`).toBeTruthy();
       expect(Number(service.mem_limit)).toBeGreaterThan(0);
     }
-  });
-
-  maybe()('moves the connector off the shared 4000 to its own loopback port, and nothing else', () => {
-    // infra#25: every node bundle's docker-compose.yml publishes its
-    // connector on 127.0.0.1:4000, which collides once several share a host.
-    // `ports: !override` must leave 4002 as the connector's ONLY publish
-    // under the overlay; the container side stays 4000.
-    const merged = composeConfig(files);
-    const connectorPorts = (merged.services.connector?.ports ?? []).map((p) => ({
-      host_ip: p.host_ip,
-      published: String(p.published),
-      target: String(p.target),
-    }));
-    expect(connectorPorts).toEqual([{ host_ip: '127.0.0.1', published: '4002', target: '4000' }]);
   });
 });
 
