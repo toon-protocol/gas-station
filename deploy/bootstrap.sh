@@ -111,8 +111,14 @@ fi
 
 echo
 echo "gas-station box up."
-echo "  paid ILP edge : https://proxy.gas.${DOMAIN}/ilp"
-echo "  identity      : https://proxy.gas.${DOMAIN}/ilp/identity"
+if printf '%s' "${COMPOSE_FILE:-}" | grep -q 'docker-compose\.shared-edge\.yml'; then
+  # The overlay disables this bundle's own connector: the devnet's one
+  # connector is the relay's, which routes to gas-web:3300 over edge-gas.
+  echo "  paid ILP edge : the relay's one connector, https://toonprotocol.dev/ilp"
+else
+  echo "  paid ILP edge : https://proxy.gas.${DOMAIN}/ilp"
+  echo "  identity      : https://proxy.gas.${DOMAIN}/ilp/identity"
+fi
 echo "  health        : https://gas.${DOMAIN}/health"
 echo
 echo "The floats still need funding — the app answers float_exhausted until they are."

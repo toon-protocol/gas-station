@@ -177,6 +177,8 @@ if [ "\${1:-}" = compose ]; then
     "pull") exit "\${STUB_PULL_EXIT:-0}" ;;
     "up -d") touch "$STUB_LOG.up"; exit "\${STUB_UP_EXIT:-0}" ;;
     "restart connector") touch "$STUB_LOG.restarted"; exit 0 ;;
+    "config --services") printf '%s\\n' \${STUB_SERVICES:-connector gas-station}; exit "\${STUB_CONFIG_EXIT:-0}" ;;
+    "rm -sf connector") exit 0 ;;
     "logs --tail 40 "*) exit 0 ;;
   esac
   echo "stub docker: unexpected compose call: $rest" >&2
@@ -522,5 +524,54 @@ describe('a merge that changes only the connector config (toon-protocol/relay#17
     expect(result.stdout).toMatch(/FAILED: the connector is 'unhealthy'/);
     expect(applied(box), 'so the next run retries it').toBe(origin.sha);
     expect(connectorInputs(box)).toBe(before);
+  });
+});
+
+describe('a stack whose connector is disabled (the devnet one-connector overlay)', () => {
+  // docker-compose.shared-edge.yml sets the connector `profiles: [disabled]`
+  // -- the devnet runs one connector, the relay's. `up -d` does NOT stop a
+  // container whose service a profile just switched off, and `ps -q
+  // connector` still finds it (the stub answers cid-connector), so the script
+  // must take it down itself rather than keep waiting on it.
+  it('removes the still-running connector container, waits on the gas station instead, and records the apply', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box, { STUB_SERVICES: 'gas-station' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls).toMatch(/config --services/);
+    expect(result.calls, 'the old connector container is stopped and removed').toMatch(
+      /rm -sf connector/
+    );
+    expect(result.calls, 'it waits on the gas station').toMatch(/ps -q gas-station/);
+    expect(restarted(result), 'never restarts a connector that is not there').toBe(false);
+    expect(applied(box)).toBe(origin.sha);
+    expect(connectorInputs(box), 'the quiet-box gate still has a record').not.toBeNull();
+
+    const quiet = autoApply(box, { STUB_SERVICES: 'gas-station' });
+    expect(quiet.calls, 'the next timer run is quiet').toBe('');
+  });
+
+  it('fails the apply when the gas station never turns healthy', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box, { STUB_SERVICES: 'gas-station', STUB_HEALTH: 'unhealthy' });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toMatch(/FAILED: the gas-station is 'unhealthy'/);
+    expect(applied(box)).toBeNull();
+  });
+
+  it('fails, rather than reading it as "no connector", when compose cannot list the services', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box, { STUB_CONFIG_EXIT: '1' });
+    expect(result.status).not.toBe(0);
+    expect(result.calls).not.toMatch(/rm -sf connector/);
+    expect(applied(box)).toBeNull();
   });
 });
