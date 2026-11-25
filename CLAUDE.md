@@ -14,9 +14,9 @@ This is a **container, not an npm package** (`@toon-protocol/gas-station`, kept
 private).
 
 `deploy/` **is** a gas-station box, not a sketch of one: nginx/TLS, connector,
-the app, certbot and Watchtower, installed by
-`deploy/bootstrap.sh` on a fresh Ubuntu host. It is sized for a 1GB host. The
-connector image is an immutable `ghcr.io/toon-protocol/connector:rust-sha-<short>`
+the app, certbot and Watchtower, installed by `deploy/bootstrap.sh` on a fresh
+Ubuntu host. It is sized for a 1GB host. The connector image is an immutable
+`ghcr.io/toon-protocol/connector:rust-sha-<short>`
 pin (bumped by commit together with the literal in `src/deploy-bundle-guard.test.ts`
 — connector ADR 0068; nothing moves `:rust-release` any more) with `connector.toml`
 bind-mounted. Config files are rendered from committed `*.template` files by
