@@ -14,9 +14,9 @@ This is a **container, not an npm package** (`@toon-protocol/gas-station`, kept
 private).
 
 `deploy/` **is** a gas-station box, not a sketch of one: nginx/TLS, connector,
-the app, certbot, Watchtower and an opt-in announce sidecar, installed by
-`deploy/bootstrap.sh` on a fresh Ubuntu host. It is sized for a 1GB host. The
-connector image is an immutable `ghcr.io/toon-protocol/connector:rust-sha-<short>`
+the app, certbot and Watchtower, installed by `deploy/bootstrap.sh` on a fresh
+Ubuntu host. It is sized for a 1GB host. The connector image is an immutable
+`ghcr.io/toon-protocol/connector:rust-sha-<short>`
 pin (bumped by commit together with the literal in `src/deploy-bundle-guard.test.ts`
 — connector ADR 0068; nothing moves `:rust-release` any more) with `connector.toml`
 bind-mounted. Config files are rendered from committed `*.template` files by
@@ -79,6 +79,10 @@ in that order and won't open a PR while any is red. It leaves out `src/gate-regr
 - Depends on no TOON package at runtime. The handler context/response types are
   a deliberate structural mirror in `src/gas-station-backend.ts` rather than an
   SDK import, so this app pins no `@toon-protocol/*` version.
+- gas-station does not adopt the SDK's app intake. It signs other people's
+  transactions with a funded key, so it keeps its runtime dependencies to what
+  it reviews, and its hand-written intake in `src/gas-station-backend.ts` stays.
+  Decided in the 2026-11-25 architecture review of the protocol repos.
 - The ILP payment engine is the separate
   **[toon-protocol/connector](https://github.com/toon-protocol/connector)**
   repo. This app receives already-paid HTTP from it and trusts that;
